@@ -1,0 +1,10 @@
+# Optional VLM branch (Phase 6, Moondream2). Kept OUT of the base env to stay light.
+# Install only when you reach Phase 6:
+#     uv pip install -r requirements-vlm.txt
+#
+# Pin exact versions after you validate Moondream output on 10-15 target images.
+transformers
+accelerate
+einops
+pillow
+# torch / torchvision already come with the base env (via ultralytics)

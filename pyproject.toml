@@ -1,0 +1,20 @@
+[project]
+name = "tracking-cv"
+version = "0.1.0"
+description = "Standalone computer-vision pipeline: frame in -> per-person metadata (track_id, age/gender, head pose, attention, dwell) out. No training; pretrained models + geometry + classic image processing."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "lapx>=0.9.4",
+    "mediapipe<0.10.14",
+    "numpy>=2.5.1",
+    "onnxruntime>=1.28.0",
+    "opencv-python>=5.0.0.93",
+    "pandas>=3.0.5",
+    "ultralytics>=8.4.114",
+]
+
+# Real-time branch base dependencies are added via `uv add` (see PLAN.md, Phase 0).
+# The optional VLM branch (Moondream, Phase 6) is kept separate in requirements-vlm.txt.
+
+[tool.uv]
+# Keep resolution pinned to the 3.12 interpreter recorded in .python-version.

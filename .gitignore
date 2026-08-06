@@ -1,0 +1,24 @@
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Model weights (download separately, keep out of git)
+models/
+*.pt
+*.pth
+*.onnx
+
+# Data & outputs
+data/
+outputs/
+*.mp4
+*.avi
+*.csv
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
