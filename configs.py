@@ -82,7 +82,7 @@ class Config:
     attention_smooth_frames: int = 3  # temporal smoothing window
 
     # ---- 3 periodic VLM branch (Phase 6, optional) ----
-    vlm_enabled: bool = False
+    vlm_enabled: bool = True
     vlm_period_seconds: float = 90.0
 
     # ---- compute ----

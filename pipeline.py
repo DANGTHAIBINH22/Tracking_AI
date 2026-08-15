@@ -18,6 +18,7 @@ from tracker import FaceTracker
 from head_pose import HeadPoseEstimator
 from age_gender import AgeGender, AgeGenderEstimator, map_age_group
 from attention import DwellTracker, is_attentive
+from scene_vlm import SceneVLM
 
 
 @dataclass
@@ -45,10 +46,26 @@ class Pipeline:
         self.head_pose = HeadPoseEstimator()         # Phase 3
         self.age_gender = AgeGenderEstimator()       # Phase 4
         self.dwell = DwellTracker()                  # Phase 5
+        self.vlm = SceneVLM() if cfg.vlm_enabled else None  # Phase 6
         self._frame_idx = 0
         self._ag_samples: dict[int, list[AgeGender]] = {}   # track_id -> raw votes
         self._age_cache: dict[int, tuple[str, str]] = {}    # track_id -> (age_group, gender)
         self._last_seen: dict[int, float] = {}
+
+    def start(self):
+        if self.vlm:
+            self.vlm.start()
+
+    def stop(self):
+        if self.vlm:
+            self.vlm.stop()
+
+    @property
+    def latest_context(self):
+        if self.vlm:
+            return self.vlm.latest
+        from scene_vlm import SceneContext
+        return SceneContext()
 
     def _reduce_votes(self, samples: list[tuple[AgeGender, int]]) -> tuple[str | None, str]:
         """Collapse several noisy per-frame estimates into one answer.
@@ -95,7 +112,7 @@ class Pipeline:
                 and self._frame_idx % self.cfg.age_gender_every_n == 0)
         )
         if due:
-            ag = self.age_gender.estimate(face_bgr)
+            ag = self.age_gender.estimate(face_bgr, track_id)
             if ag is not None:
                 samples.append((ag, int(face_bgr.shape[0])))
                 self._age_cache[track_id] = self._reduce_votes(samples)
@@ -130,24 +147,48 @@ class Pipeline:
         sharper face crop for age/gender. Pass it whenever you have it.
         """
         self._frame_idx += 1
+        
+        # Bước 1: Phân tích bối cảnh VLM định kỳ (Async Thread)
+        if self.vlm:
+            print(f"[Pipeline - Frame {self._frame_idx}] Bước 1: Gửi frame gốc sang luồng xử lý bối cảnh VLM")
+            self.vlm.submit_frame(source_frame if source_frame is not None else frame_bgr)
+            
+        # Bước 2: Phát hiện & theo vết khuôn mặt (YOLO & ByteTrack)
+        print(f"[Pipeline - Frame {self._frame_idx}] Bước 2: Chạy dò tìm & theo vết khuôn mặt (YOLO/ByteTrack)")
         tracks = self.tracker.update(frame_bgr)
 
         now = time.time() if now is None else now
         self._retire({t.track_id for t in tracks}, now)
 
         metas = []
-        for t in tracks:
-            self._last_seen[t.track_id] = now
+        print(f"[Pipeline - Frame {self._frame_idx}] Phát hiện {len(tracks)} đối tượng khuôn mặt hoạt động")
+        
+        for idx, t in enumerate(tracks):
+            print(f"  --> Xử lý đối tượng {idx+1}/{len(tracks)} (Track ID: {t.track_id})")
+            
+            # Bước 3: Trích xuất face crop
             face_bgr = crop_face(frame_bgr, t.bbox)
             face_rgb = to_rgb(face_bgr) if face_bgr.size > 0 else None
+            h_c, w_c = face_bgr.shape[:2] if face_bgr is not None else (0, 0)
+            print(f"      - Bước 3.1: Trích xuất Face Bounding Box {t.bbox} (Kích thước crop: {w_c}x{h_c})")
 
+            # Bước 4: Ước lượng hướng xoay đầu 3D (solvePnP)
             pose = self.head_pose.estimate(face_rgb) if face_rgb is not None else None
+            yaw_val = round(pose.yaw, 1) if pose else None
+            pitch_val = round(pose.pitch, 1) if pose else None
+            print(f"      - Bước 3.2: Ước lượng góc đầu (Yaw: {yaw_val}°, Pitch: {pitch_val}°)")
+            
+            # Bước 5: Dự đoán tuổi & giới tính (MiVOLO / Caching Vote)
             age_group, gender = self._age_gender_voted(
                 t.track_id, self._attribute_crop(frame_bgr, source_frame, t.bbox)
             )
+            gender_vn = "Nam" if gender == "M" else ("Nữ" if gender == "F" else "Chưa rõ")
+            print(f"      - Bước 3.3: Phân tích giới tính/tuổi: {gender_vn} ({age_group})")
 
+            # Bước 6: Đánh giá trạng thái nhìn (Gaze Attention) & Dwell time
             attentive_now = is_attentive(pose) if pose is not None else False
             smoothed_att, dwell_time = self.dwell.update(t.track_id, attentive_now, now)
+            print(f"      - Bước 3.4: Trạng thái chú ý: {'Có nhìn' if smoothed_att else 'Không nhìn'} | Thời gian giữ mắt: {round(dwell_time, 2)} giây")
 
             metas.append(
                 PersonMeta(
