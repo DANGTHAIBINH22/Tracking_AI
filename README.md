@@ -14,17 +14,17 @@ Dự án được thực hiện bởi nhóm sinh viên **Đặng Thái Bình** &
 graph TD
     A[Camera / Webcam] -->|Luồng BGR Frame| B(Edge AI Preprocessing)
     B -->|Resize & CLAHE| C{Phát phân nhánh}
-    
+  
     C -->|Real-time Branch: Mỗi frame| D[YOLOv8-Face & ByteTrack]
     D -->|Crop Face với 30% margin| E[Estimators]
     E -->|ONNX MiVOLO| F[Age & Gender]
     E -->|MediaPipe mesh + solvePnP| G[Head Pose & Attention Classifier]
     F & G -->|Bỏ phiếu & làm mịn| H[Metadata người dùng: M_user]
-    
+  
     C -->|Periodic Branch: Mỗi 1-2 phút| I[Asynchronous VLM Thread]
     I -->|Moondream VLM VQA| K[Weather, Activity, Objects]
     K -->|Regex Parser| L[Metadata bối cảnh: M_env]
-    
+  
     H & L -->|Socket/FastAPI Request| M[FastAPI Backend - CARE Engine]
     M -->|Chấm điểm Weighted Scoring| N[Ad Player Interface Next.js]
     M -->|Lưu log tương tác L| O[(PostgreSQL Database)]
@@ -32,9 +32,11 @@ graph TD
 ```
 
 ### 2. Sơ đồ mô tả Input và Output bài toán (Input/Output Diagram)
+
 ![system_input_output](images/system_input_output_vietnamese.jpg)
 
 ### 3. Sơ đồ Quy trình xử lý chi tiết (Pipeline Flowchart)
+
 ![system_pipeline_detailed](images/system_pipeline_detailed.jpg)
 
 ### 4. Cơ cấu Cơ sở dữ liệu (Database Construction)
@@ -72,6 +74,7 @@ CREATE TABLE interaction_logs (
 ```
 
 ### 5. Luồng Nghiệp vụ Chi tiết (Detailed Workflow)
+
 1. **Camera Input**: Luồng camera liên tục ghi lại BGR frame.
 2. **Preprocessing**: Ảnh được resize (cạnh dài 640px) để duy trì tốc độ và cân bằng sáng bằng bộ lọc **CLAHE** chống ngược sáng.
 3. **Real-time Branch (Nhánh thời gian thực)**:
@@ -89,14 +92,18 @@ CREATE TABLE interaction_logs (
 ## II. Hướng dẫn thiết lập & Chạy thử nghiệm (Setup & Run)
 
 ### 1. Cài đặt môi trường
+
 Dự án được quản lý môi trường và thư viện tự động bằng công cụ **`uv`**:
+
 ```bash
 # Đồng bộ môi trường và tải các thư viện real-time từ uv.lock
 uv sync
 ```
+
 *(Nếu muốn chạy nhánh VLM thật, hãy cài đặt các thư viện bổ sung qua: `uv pip install -r requirements-vlm.txt`)*
 
 ### 2. Chạy thử nghiệm Demo
+
 * **Chạy nhận dạng camera/webcam trực tiếp hiển thị giao diện overlay:**
   ```bash
   uv run python run_webcam.py
@@ -107,7 +114,9 @@ uv sync
   ```
 
 ### 3. Chạy thực nghiệm lấy số liệu báo cáo đồ án
+
 Chúng ta chạy các script đánh giá độc lập nằm trong thư mục `eval/`:
+
 * **Đo tương phản và tỉ lệ phát hiện khuôn mặt ngược sáng có vs không có CLAHE:**
   ```bash
   uv run python eval/eval_clahe.py

@@ -58,7 +58,10 @@ class SceneVLM:
                 self.device = "mps"
                 
             print(f"[VLM] Đang tải Moondream ({CFG.device}) trên thiết bị {self.device}...")
-            self._tokenizer = AutoTokenizer.from_pretrained(CFG.vlm_model_id if hasattr(CFG, "vlm_model_id") else "vikhyat/moondream2")
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                CFG.vlm_model_id if hasattr(CFG, "vlm_model_id") else "vikhyat/moondream2",
+                trust_remote_code=True
+            )
             self._model = AutoModelForCausalLM.from_pretrained(
                 CFG.vlm_model_id if hasattr(CFG, "vlm_model_id") else "vikhyat/moondream2",
                 trust_remote_code=True,

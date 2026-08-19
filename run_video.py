@@ -8,6 +8,9 @@ branch — the stable interface any app layer can consume later.
 
 from __future__ import annotations
 
+import warnings
+warnings.filterwarnings("ignore")
+
 import argparse
 import csv
 from pathlib import Path

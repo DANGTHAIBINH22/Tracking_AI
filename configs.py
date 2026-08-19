@@ -84,6 +84,7 @@ class Config:
     # ---- 3 periodic VLM branch (Phase 6, optional) ----
     vlm_enabled: bool = True
     vlm_period_seconds: float = 90.0
+    verbose: bool = False  # Toggle pipeline stage logging
 
     # ---- compute ----
     device: str = field(default_factory=pick_device)

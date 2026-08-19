@@ -8,6 +8,9 @@ Stages light up as later phases land. Press 'q' to quit.
 
 from __future__ import annotations
 
+import warnings
+warnings.filterwarnings("ignore")
+
 import time
 import math
 import cv2
