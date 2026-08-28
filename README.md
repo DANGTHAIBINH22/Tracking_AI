@@ -102,7 +102,33 @@ uv sync
 
 *(Nếu muốn chạy nhánh VLM thật, hãy cài đặt các thư viện bổ sung qua: `uv pip install -r requirements-vlm.txt`)*
 
-### 2. Chạy thử nghiệm Demo
+### 2. Tải và Thiết lập các File Trọng số (Model Weights Setup)
+
+Để hệ thống hoạt động đầy đủ tính năng suy luận AI, bạn cần thiết lập các tệp tin trọng số mô hình trong thư mục `models/` (đã được cấu hình trong `configs.py` và được bỏ qua trong Git):
+
+#### A. Trọng số YOLOv8-Face (`models/yolov8n-face.pt` - ~6MB)
+* **Tự động:** Khi khởi chạy lần đầu qua các lệnh `run_webcam.py`, `run_video.py` hoặc `test_pipeline_dryrun.py`, hệ thống sẽ tự động phát hiện và tải file này từ Hugging Face về thư mục `models/` cho bạn.
+* **Thủ công:** Bạn có thể tải trực tiếp từ link [Hugging Face YOLOv8-Face](https://huggingface.co/junjiang/GestureFace/resolve/main/yolov8n-face.pt) và đặt vào thư mục:
+  `models/yolov8n-face.pt`
+
+#### B. Trọng số MiVOLO ONNX (`models/mivolo_age_gender.onnx` - ~100MB)
+Do tệp trọng số MiVOLO ONNX chính gốc không có liên kết tải trực tiếp chính thức và bị bỏ qua trong Git, bạn có hai cách tiếp cận:
+* **Cách 1: Lấy file ONNX trực tiếp từ nhóm thiết kế** (Khuyên dùng). Sao chép tệp `mivolo_age_gender.onnx` do nhóm chuyển giao vào thư mục:
+  `models/mivolo_age_gender.onnx`
+* **Cách 2: Tự tạo file ONNX nội bộ (Surrogate ONNX model)**: Kích hoạt môi trường ảo và chạy lệnh sau để tự sinh một mô hình ONNX thay thế giúp pipeline chạy thật trên ONNX Runtime:
+  ```bash
+  # Tải thư viện hỗ trợ xuất ONNX
+  uv pip install onnxscript
+  
+  # Chạy script tự động xuất ONNX mô phỏng
+  uv run python -c "import urllib.request; urllib.request.urlretrieve('https://raw.githubusercontent.com/binhdang/UIT/main/generate_mivolo_onnx.py', 'generate_mivolo_onnx.py'); import subprocess; subprocess.run(['python', 'generate_mivolo_onnx.py'])"
+  ```
+
+#### C. Trọng số Moondream VLM (`vikhyat/moondream2` - ~1.6GB)
+* **Tự động:** Khi bạn bật chế độ VLM (`vlm_enabled: bool = True` trong `configs.py`), luồng chạy nền sẽ tự động tải Moondream2 thông qua thư viện `transformers` của Hugging Face và lưu vào thư mục cache của hệ thống.
+* **Yêu cầu:** Máy tính cần có kết nối mạng Internet ở lần khởi chạy đầu tiên. Thư viện sẽ tự động phân phối trọng số tối ưu (định dạng `float16` trên Apple Silicon/CUDA, `float32` trên CPU) với cờ `trust_remote_code=True`.
+
+### 3. Chạy thử nghiệm Demo
 
 * **Chạy nhận dạng camera/webcam trực tiếp hiển thị giao diện overlay:**
   ```bash
@@ -113,7 +139,7 @@ uv sync
   uv run python run_video.py --video data/test.mp4 --out outputs/test.csv
   ```
 
-### 3. Chạy thực nghiệm lấy số liệu báo cáo đồ án
+### 4. Chạy thực nghiệm lấy số liệu báo cáo đồ án
 
 Chúng ta chạy các script đánh giá độc lập nằm trong thư mục `eval/`:
 
