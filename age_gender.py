@@ -49,7 +49,7 @@ def map_age_group(age: float) -> str:
 
 GENDER_LIST = ["M", "F"]
 
-INPUT_SIZE = 224
+INPUT_SIZE = 384
 # ImageNet normalisation (MiVOLO backbone is ImageNet-pretrained VOLO), applied to
 # an RGB [0,1] image - NOT the Caffe BGR mean the old GoogLeNet pair used.
 IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
