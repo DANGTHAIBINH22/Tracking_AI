@@ -32,19 +32,26 @@ class FaceDetector:
         self.mp_face = None
 
     def _ensure_model(self):
-        if self._model is not None or self.use_fallback:
-            return
-            
-        try:
-            from ultralytics import YOLO
-            self._model = YOLO(str(self.weights))
-            print(f"[Detector] Đã tải mô hình YOLOv8-face: {self.weights}")
-        except Exception as e:
-            print(f"[Detector] Lỗi tải YOLOv8-face ({e}). Chuyển sang sử dụng MediaPipe làm bộ dò dự phòng.")
-            self.use_fallback = True
-            
-        if self.use_fallback:
+        """Load YOLO, or stand up the MediaPipe fallback.
+
+        The two halves are separate checks on purpose. The old single early-return
+        (`if self._model is not None or self.use_fallback`) meant that flipping
+        use_fallback AFTER YOLO had loaded — which is exactly what detect() does
+        when inference throws — bailed out with self._model still set, so mp_face
+        stayed None and the very next line raised AttributeError on NoneType.
+        """
+        if not self.use_fallback and self._model is None:
+            try:
+                from ultralytics import YOLO
+                self._model = YOLO(str(self.weights))
+                print(f"[Detector] Đã tải mô hình YOLOv8-face: {self.weights}")
+            except Exception as e:
+                print(f"[Detector] Lỗi tải YOLOv8-face ({e}). Chuyển sang sử dụng MediaPipe làm bộ dò dự phòng.")
+                self.use_fallback = True
+
+        if self.use_fallback and self.mp_face is None:
             import mediapipe as mp
+            self._model = None
             self.mp_face = mp.solutions.face_detection.FaceDetection(
                 model_selection=0,
                 min_detection_confidence=CFG.conf_threshold
@@ -78,7 +85,7 @@ class FaceDetector:
                 self.use_fallback = True
                 self._ensure_model()
                 
-        if self.use_fallback:
+        if self.use_fallback and self.mp_face is not None:
             # MediaPipe expects RGB
             rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
             results = self.mp_face.process(rgb)

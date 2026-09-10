@@ -46,19 +46,26 @@ class DwellTracker:
         return smoothed, self.current_dwell(track_id, now)
 
     def current_dwell(self, track_id: int, now: float | None = None) -> float:
+        """Read a track's dwell WITHOUT creating state for it.
+
+        `self._dwell[track_id]` on a defaultdict inserts a zero entry, so polling
+        this for ids the tracker never reported (a dashboard asking about a
+        stale id, say) grows the dicts without bound and makes `forget` a lie.
+        """
         now = time.time() if now is None else now
-        start = self._session_start[track_id]
+        start = self._session_start.get(track_id)
         live = (now - start) if start is not None else 0.0
-        return self._dwell[track_id] + live
+        return self._dwell.get(track_id, 0.0) + live
 
     def close(self, track_id: int, now: float | None = None) -> None:
         """Track disappeared: close any open session. Idempotent."""
         now = time.time() if now is None else now
-        start = self._session_start[track_id]
+        start = self._session_start.get(track_id)
         if start is not None:
             self._dwell[track_id] += now - start
             self._session_start[track_id] = None
-        self._recent[track_id].clear()  # restart smoothing when the track returns
+        if track_id in self._recent:
+            self._recent[track_id].clear()  # restart smoothing when the track returns
 
     def forget(self, track_id: int) -> None:
         """Drop a track's state entirely, once it is gone for good.

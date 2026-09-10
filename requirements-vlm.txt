@@ -2,7 +2,15 @@
 # Install only when you reach Phase 6:
 #     uv pip install -r requirements-vlm.txt
 #
-# Pin exact versions after you validate Moondream output on 10-15 target images.
+# KNOWN BLOCKER (2026-09): Moondream2 cannot currently load in this env.
+#   transformers>=5 breaks its trust_remote_code path:
+#       AttributeError: 'HfMoondream' object has no attribute 'all_tied_weights_keys'
+#   but transformers<5 requires huggingface-hub<1.0, while timm (MiVOLO's dependency,
+#   part of the real-time pipeline) holds huggingface-hub at 1.30.0 via uv.lock —
+#   and `uv run` re-syncs that pin on every start, undoing any manual downgrade.
+# Until moondream2 ships a transformers-5 revision, SceneVLM degrades to an empty
+# SceneContext (it never invents values), and the CARE engine simply scores without
+# the weather/object dimensions. Tracked upstream: huggingface/transformers#42270.
 transformers
 accelerate
 einops

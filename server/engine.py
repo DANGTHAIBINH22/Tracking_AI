@@ -1,0 +1,557 @@
+"""The analytics engine: one capture thread turning frames into per-advert numbers.
+
+    frame source -> preprocess -> Pipeline.process -> PersonMeta[]
+                                                   -> live snapshot (websocket / MJPEG)
+                                                   -> impressions (postgres, per airing)
+
+The frame source is either the API host's own camera or a browser pushing JPEGs
+in over /ws/ingest (see `server/sources.py`); the loop below cannot tell which,
+and neither can anything downstream of it.
+
+Only ONE thread ever touches the Pipeline. That is not a convenience — the
+tracker holds ultralytics' ByteTrack state behind `model.track(persist=True)`,
+which is a single mutable association history. Two threads pushing frames into it
+would interleave two scenes into one set of track ids and quietly corrupt every
+dwell time and unique count the dashboard reports.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import threading
+import time
+from dataclasses import dataclass, field
+
+import cv2
+import numpy as np
+
+from configs import CFG
+from pipeline import Pipeline, PersonMeta
+from preprocess import preprocess
+from server import db
+from server.audience import normalize_age_group
+from server.player import PlaylistPlayer
+from server.settings import SETTINGS
+from server.sources import BROWSER_SOURCE, BrowserSource, LocalCameraSource, is_browser_source
+from viz import draw_person, draw_fps
+
+
+@dataclass
+class _TrackState:
+    """What we know about one person while they are still in frame."""
+    track_id: int
+    airing_id: int | None
+    first_seen: float
+    last_seen: float
+    dwell_at_entry: float          # pipeline dwell when this (track, airing) began
+    dwell_latest: float
+    age_group: str | None = None
+    gender: str | None = None
+
+    @property
+    def presence(self) -> float:
+        return max(0.0, self.last_seen - self.first_seen)
+
+    @property
+    def attention(self) -> float:
+        # Pipeline dwell is cumulative for the LIFE of the track. The share that
+        # belongs to this airing is the delta since the airing started, which is
+        # why entry is snapshotted rather than reading dwell_time directly.
+        return max(0.0, self.dwell_latest - self.dwell_at_entry)
+
+
+
+
+
+class AnalyticsEngine:
+    def __init__(self, player: PlaylistPlayer) -> None:
+        self.player = player
+        self._lock = threading.RLock()
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._running = False
+        self._source: str | None = None
+        self._error: str | None = None
+        # Owned here rather than in `state`, so there is one obvious answer to
+        # "who is allowed to push frames": whoever the running engine is reading.
+        self.browser = BrowserSource(
+            stale_after=SETTINGS.ingest_stale_after,
+            max_bytes=SETTINGS.ingest_max_frame_bytes,
+        )
+
+        self._pipeline: Pipeline | None = None
+        self._states: dict[int, _TrackState] = {}
+        self._unique_ids: set[int] = set()
+        self._latest_metas: list[PersonMeta] = []
+        self._latest_jpeg: bytes | None = None
+        self._frame_cond = threading.Condition()
+        self._frame_seq = 0
+        self._stream_subscribers: set[asyncio.Queue] = set()
+        self._event_loop: asyncio.AbstractEventLoop | None = None
+        self._fps = 0.0
+        self._frame_index = 0
+
+    # ---------- lifecycle ----------
+
+    def start(self, source: str | None = None) -> None:
+        with self._lock:
+            if self._running:
+                return
+            self._source = source or SETTINGS.default_source
+            self._error = None
+            self._running = True
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._loop, daemon=True, name="analytics")
+            self._thread.start()
+
+    def stop(self) -> None:
+        with self._lock:
+            if not self._running:
+                return
+            self._running = False
+        self._stop.set()
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout=5.0)
+        self._flush_all(time.time())
+
+    @property
+    def running(self) -> bool:
+        with self._lock:
+            return self._running
+
+    @property
+    def mode(self) -> str:
+        """"browser" or "server" — cheap enough to call per received frame,
+        unlike snapshot(), which serialises every track."""
+        with self._lock:
+            return "browser" if is_browser_source(self._source) else "server"
+
+    # ---------- live state for the API ----------
+
+    def _compute_recommendation(self, metas: list) -> dict | None:
+        if not metas:
+            return None
+
+        people_count = len(metas)
+        if people_count == 1:
+            crowd_context = "single"
+            crowd_str = "1 khán giả"
+        elif 2 <= people_count <= 4:
+            crowd_context = "group"
+            crowd_str = f"Nhóm {people_count} người"
+        else:
+            crowd_context = "crowd"
+            crowd_str = f"Đám đông {people_count} người"
+
+        # Prioritize attentive viewers, then longest dwell time
+        attentive = [m for m in metas if getattr(m, "attention", 0)]
+        candidates = attentive if attentive else metas
+        priority_viewer = max(candidates, key=lambda m: getattr(m, "dwell_time", 0.0))
+
+        # Translate the pipeline's bin label ("0-18", "55+") into the spelling
+        # an advert's target is stored in ("<18", ">55"). Comparing them raw
+        # inverted the score at both ends: an advert aimed at children was
+        # penalised whenever a child was the one watching.
+        v_age_grp = normalize_age_group(priority_viewer.age_group)
+        v_gender = priority_viewer.gender
+        v_age = getattr(priority_viewer, "age", None)
+
+        # Score over exactly what the player can put on screen — the active
+        # playlist. Querying `creatives WHERE enabled` instead silently returned
+        # zero candidates once playlist membership moved to `playlist_items`,
+        # which killed every recommendation, and could otherwise recommend a
+        # creative that is not in rotation at all.
+        try:
+            creatives = self.player.playlist()
+        except Exception:
+            return None
+
+        if not creatives:
+            return None
+
+        # The "C" in CARE: ambient scene context from the async VLM branch
+        # (scene_vlm.py). Empty/None fields mean the branch is disabled or has
+        # not completed a pass yet — those never penalise a creative, they just
+        # take the dimension out of scoring.
+        scene = self._pipeline.latest_context if self._pipeline is not None else None
+        scene_weather = getattr(scene, "weather", None)
+        scene_objects = [o.lower() for o in (getattr(scene, "objects", None) or []) if o and o != "none"]
+
+        best_c = None
+        best_score = -1.0
+        scored: list[tuple[float, int]] = []
+
+        for c in creatives:
+            score = 20.0
+            tag_age = c.get("target_age_group") or "all"
+            tag_gen = c.get("target_gender") or "all"
+            tag_crowd = c.get("target_crowd") or "all"
+            tag_weather = c.get("target_weather") or "all"
+
+            # Crowd context scoring (Bối cảnh số lượng người)
+            if tag_crowd == crowd_context:
+                score += 35.0
+            elif tag_crowd == "all":
+                score += 15.0
+            else:
+                score -= 15.0
+
+            # Age score
+            if v_age_grp:
+                if tag_age == v_age_grp:
+                    score += 30.0
+                elif tag_age == "all":
+                    score += 10.0
+                else:
+                    score -= 10.0
+
+            # Gender score
+            if v_gender:
+                if tag_gen == v_gender:
+                    score += 25.0
+                elif tag_gen == "all":
+                    score += 10.0
+                else:
+                    score -= 10.0
+
+            # Weather score (Bối cảnh thời tiết, từ VLM)
+            if scene_weather:
+                if tag_weather == scene_weather:
+                    score += 20.0
+                elif tag_weather == "all":
+                    score += 5.0
+                else:
+                    score -= 10.0
+
+            # Ambient-object score: keyword match between what the VLM saw
+            # (shopping bags, laptops, food/beverage, ...) and this creative's
+            # free-text category/description. Same rule-based approach as
+            # `suggest_target` — no model, just a fixed vocabulary.
+            if scene_objects:
+                cat_txt = f"{c.get('category') or ''} {c.get('description') or ''}".lower()
+                obj_txt = " ".join(scene_objects)
+                if ("food" in obj_txt or "beverage" in obj_txt) and (
+                    "thực phẩm" in cat_txt or "đồ uống" in cat_txt
+                ):
+                    score += 10.0
+                if ("shopping bag" in obj_txt or "bag" in obj_txt) and (
+                    "thời trang" in cat_txt or "làm đẹp" in cat_txt
+                ):
+                    score += 10.0
+                if "laptop" in obj_txt and ("công nghệ" in cat_txt or "gaming" in cat_txt):
+                    score += 10.0
+
+            score = max(10.0, min(99.0, score))
+            scored.append((score, c["id"]))
+            if score > best_score:
+                best_score = score
+                best_c = c
+
+        if best_c is None:
+            return None
+
+        g_str = "Nam" if v_gender == "M" else "Nữ" if v_gender == "F" else "Khán giả"
+        age_str = f"~{round(v_age)} tuổi" if v_age is not None else (v_age_grp or "")
+        att_str = "đang chú ý nhìn màn hình" if priority_viewer.attention else "đang đứng trước màn hình"
+        cat_str = best_c.get("category") or "Sản phẩm"
+        target_crowd_display = (
+            "mọi quy mô" if best_c.get("target_crowd") == "all"
+            else "1 người (cá nhân)" if best_c.get("target_crowd") == "single"
+            else "nhóm 2-4 người" if best_c.get("target_crowd") == "group"
+            else "đám đông ≥ 5 người"
+        )
+
+        weather_vi = {"sunny": "trời nắng", "cloudy": "trời nhiều mây", "rainy": "trời mưa"}.get(scene_weather)
+        weather_clause = f", {weather_vi}" if weather_vi else ""
+
+        reason = f"{crowd_str} ({g_str} {age_str}) {att_str}{weather_clause} — phù hợp bối cảnh {target_crowd_display} và {cat_str}."
+
+        # Hand over the whole ranking, not just the winner: the player needs a
+        # runner-up for the boundary where the best match is the advert ending.
+        if getattr(self.player, "smart_targeting", False):
+            self.player.set_audience_ranking([cid for _, cid in sorted(scored, reverse=True)])
+
+        return {
+            "target_creative_id": best_c["id"],
+            "target_creative_name": best_c["name"],
+            "target_creative_url": f"/media/{best_c['filename']}",
+            "category": cat_str,
+            "match_score": round(best_score, 1),
+            "viewer_age_group": v_age_grp,
+            "viewer_gender": v_gender,
+            "viewer_approx_age": round(v_age, 1) if v_age is not None else None,
+            "crowd_context": crowd_context,
+            "people_count": people_count,
+            "scene_weather": scene_weather,
+            "scene_objects": scene_objects,
+            "reason": reason,
+        }
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            metas = list(self._latest_metas)
+            rec = self._compute_recommendation(metas)
+            return {
+                "running": self._running,
+                "source": self._source,
+                "mode": "browser" if is_browser_source(self._source) else "server",
+                "fps": round(self._fps, 1),
+                "frame_index": self._frame_index,
+                "people_now": len(metas),
+                "attentive_now": sum(1 for m in metas if m.attention),
+                "unique_viewers_session": len(self._unique_ids),
+                "error": self._error,
+                "recommendation": rec,
+                "smart_targeting": getattr(self.player, "smart_targeting", False),
+                "tracks": [
+                    {
+                        "track_id": m.track_id,
+                        "bbox": tuple(m.bbox),
+                        "age": None if getattr(m, "age", None) is None else round(m.age, 1),
+                        "age_group": m.age_group,
+                        "gender": m.gender,
+                        "yaw": None if m.yaw is None else round(m.yaw, 1),
+                        "pitch": None if m.pitch is None else round(m.pitch, 1),
+                        "attention": m.attention,
+                        "dwell_time": round(m.dwell_time, 2),
+                    }
+                    for m in metas
+                ],
+            }
+
+    def set_event_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._event_loop = loop
+
+    def subscribe_stream(self) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue(maxsize=2)
+        with self._lock:
+            self._stream_subscribers.add(q)
+        return q
+
+    def unsubscribe_stream(self, q: asyncio.Queue) -> None:
+        with self._lock:
+            self._stream_subscribers.discard(q)
+
+    def next_jpeg(self, last_seq: int, timeout: float = 1.0) -> tuple[int, bytes | None]:
+        """Condition-variable-based wait: multiple clients never steal each other's wake-up."""
+        with self._frame_cond:
+            if self._frame_seq == last_seq and self._running:
+                self._frame_cond.wait_for(lambda: self._frame_seq != last_seq or not self._running, timeout=timeout)
+            return self._frame_seq, self._latest_jpeg
+
+    def latest_jpeg(self, timeout: float = 1.0) -> bytes | None:
+        """Block briefly for the next annotated frame (MJPEG streaming fallback)."""
+        with self._frame_cond:
+            if self._running and self._latest_jpeg is None:
+                self._frame_cond.wait(timeout)
+            return self._latest_jpeg
+
+    # ---------- attribution ----------
+
+    def _observe(self, metas: list[PersonMeta], now: float) -> None:
+        airing_id, _ = self.player.current_airing()
+        live_ids = set()
+
+        for m in metas:
+            live_ids.add(m.track_id)
+            self._unique_ids.add(m.track_id)
+            state = self._states.get(m.track_id)
+
+            # A new airing starts a NEW impression for a person who is still
+            # standing there: the same viewer can see three adverts in a row and
+            # each one earned its own measurement.
+            if state is not None and state.airing_id != airing_id:
+                self._flush(state, now)
+                state = None
+
+            if state is None:
+                state = _TrackState(
+                    track_id=m.track_id,
+                    airing_id=airing_id,
+                    first_seen=now,
+                    last_seen=now,
+                    dwell_at_entry=m.dwell_time,
+                    dwell_latest=m.dwell_time,
+                )
+                self._states[m.track_id] = state
+
+            state.last_seen = now
+            state.dwell_latest = m.dwell_time
+            if m.age_group:
+                state.age_group = normalize_age_group(m.age_group) or m.age_group
+            if m.gender:
+                state.gender = m.gender
+
+        for track_id in [t for t in self._states if t not in live_ids]:
+            state = self._states.pop(track_id)
+            self._flush(state, now)
+
+    def _flush(self, state: _TrackState, now: float) -> None:
+        """Persist one (airing, track) measurement, if it clears the noise floor."""
+        if state.airing_id is None:
+            return  # nothing was on screen; there is no advert to credit
+        if state.presence < SETTINGS.min_presence_seconds:
+            return  # a one-frame flicker from the tracker, not a person
+        try:
+            db.execute(
+                """
+                INSERT INTO impressions
+                    (airing_id, creative_id, track_id, first_seen, last_seen,
+                     presence_seconds, attention_seconds, age_group, gender)
+                -- SELECT-from-airings rather than VALUES: an operator can delete
+                -- a creative while it is on air, and ON DELETE CASCADE takes the
+                -- airing with it while this thread still holds a state pointing
+                -- at it. Sourcing creative_id from the row makes the write a
+                -- no-op once the airing is gone, instead of inserting NULL and
+                -- killing the capture loop on a not-null violation.
+                SELECT a.id, a.creative_id, %s, %s, %s, %s, %s, %s, %s
+                FROM airings a WHERE a.id = %s
+                -- Re-flushed every time the track's numbers move, so the row is
+                -- always the latest measurement rather than the first one.
+                ON CONFLICT (airing_id, track_id) DO UPDATE SET
+                    last_seen         = excluded.last_seen,
+                    presence_seconds  = excluded.presence_seconds,
+                    attention_seconds = excluded.attention_seconds,
+                    age_group         = COALESCE(excluded.age_group, impressions.age_group),
+                    gender            = COALESCE(excluded.gender, impressions.gender)
+                """,
+                (state.track_id, state.first_seen, state.last_seen, state.presence,
+                 state.attention, state.age_group, state.gender, state.airing_id),
+            )
+        except Exception as exc:
+            # One lost measurement beats a dead screen. The loop's own handler
+            # tears the engine down, which for a kiosk would turn a transient
+            # database blip into analytics that never come back.
+            with self._lock:
+                self._error = f"Không ghi được lượt xem: {exc}"
+
+    def _flush_all(self, now: float) -> None:
+        for state in list(self._states.values()):
+            self._flush(state, now)
+        self._states.clear()
+
+    # ---------- capture loop ----------
+
+    def _open_source(self) -> LocalCameraSource | BrowserSource:
+        if is_browser_source(self._source):
+            src = self.browser
+            src.open()
+            return src
+        src = LocalCameraSource(self._source or "0")
+        src.open()
+        return src
+
+    def _loop(self) -> None:
+        source = None
+        try:
+            source = self._open_source()
+            from_browser = isinstance(source, BrowserSource)
+
+            self._pipeline = Pipeline()
+            self._pipeline.start()
+            frame_idx = 0
+            last_tick = time.perf_counter()
+            min_dt = 1.0 / SETTINGS.capture_max_fps
+
+            while not self._stop.is_set():
+                t_frame = time.perf_counter()
+                ok, frame = source.read()
+
+                if frame is None:
+                    if ok:
+                        # Nothing new yet. A browser between frames, not an
+                        # ending: keep the engine up so a reloading screen
+                        # rejoins instead of finding the pipeline torn down.
+                        continue
+                    if source.rewind() and SETTINGS.loop_video_source:
+                        # Kiosk demo: replay the file, but reset the tracker so
+                        # frame 0 of the rewind is not associated with the last
+                        # frame of the previous pass.
+                        self._flush_all(time.time())
+                        self._pipeline.reset()
+                        continue
+                    break
+
+                prep = preprocess(frame)
+                # Wall-clock timing: a live camera is the target, and even a looped
+                # file is being replayed as if it were happening now.
+                now = time.time()
+                metas = self._pipeline.process(prep, now=now, source_frame=frame)
+                self._observe(metas, now)
+                if getattr(self.player, "smart_targeting", False):
+                    self._compute_recommendation(metas)
+
+                elapsed = max(time.perf_counter() - last_tick, 1e-6)
+                last_tick = time.perf_counter()
+                fps = 1.0 / elapsed
+
+                self._render(prep, metas, fps)
+                with self._lock:
+                    self._latest_metas = metas
+                    self._fps = fps
+                    self._frame_index = frame_idx
+                frame_idx += 1
+
+                # Never let a file source race ahead of real time — dwell is
+                # measured on the wall clock, so a 300 FPS decode would report
+                # everyone as a 0.1-second glance. Browser frames need no pacing
+                # at all: they arrive at the rate the screen chose to send them,
+                # and read() already blocked for them.
+                if from_browser:
+                    continue
+                native = source.native_fps
+                budget = (1.0 / native) if (source.is_file and native) else min_dt
+                spare = budget - (time.perf_counter() - t_frame)
+                if spare > 0:
+                    self._stop.wait(spare)
+
+        except Exception as exc:  # a dead camera must not take the API down
+            with self._lock:
+                self._error = str(exc)
+        finally:
+            if source is not None:
+                # Only the local source owns an OS handle; the browser source is
+                # a shared mailbox that outlives any one run, so it is emptied
+                # rather than closed.
+                if isinstance(source, BrowserSource):
+                    source.release_frames()
+                else:
+                    source.release()
+            if self._pipeline is not None:
+                self._pipeline.stop()
+                self._pipeline = None
+            with self._lock:
+                self._running = False
+                self._latest_metas = []
+
+    def _render(self, frame_bgr: np.ndarray, metas: list[PersonMeta], fps: float) -> None:
+        canvas = frame_bgr.copy()
+        for m in metas:
+            draw_person(canvas, m)
+        draw_fps(canvas, fps)
+        ok, buf = cv2.imencode(".jpg", canvas, [int(cv2.IMWRITE_JPEG_QUALITY), SETTINGS.mjpeg_quality])
+        if ok:
+            jpeg_bytes = buf.tobytes()
+            with self._frame_cond:
+                self._latest_jpeg = jpeg_bytes
+                self._frame_seq += 1
+                self._frame_cond.notify_all()
+
+            with self._lock:
+                subs = list(self._stream_subscribers)
+                loop = self._event_loop
+
+            if subs and loop is not None and loop.is_running():
+                def _distribute():
+                    for q in subs:
+                        if q.full():
+                            try:
+                                q.get_nowait()
+                            except Exception:
+                                pass
+                        try:
+                            q.put_nowait(jpeg_bytes)
+                        except Exception:
+                            pass
+                loop.call_soon_threadsafe(_distribute)

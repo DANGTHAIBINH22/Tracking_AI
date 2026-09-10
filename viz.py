@@ -36,7 +36,9 @@ def draw_person(frame_bgr: np.ndarray, meta) -> None:
     cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), colour, 2)
 
     label_parts = [f"#{meta.track_id}"]
-    if meta.age_group:
+    if getattr(meta, "age", None) is not None and meta.age_group:
+        label_parts.append(f"~{round(meta.age)}y ({meta.age_group})")
+    elif meta.age_group:
         label_parts.append(f"Age:{meta.age_group}")
     if meta.gender:
         label_parts.append(f"G:{meta.gender}")

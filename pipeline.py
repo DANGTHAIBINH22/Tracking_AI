@@ -25,6 +25,7 @@ from scene_vlm import SceneVLM
 class PersonMeta:
     track_id: int
     bbox: tuple[int, int, int, int]
+    age: float | None = None
     age_group: str | None = None
     gender: str | None = None
     yaw: float | None = None
@@ -49,8 +50,22 @@ class Pipeline:
         self.vlm = SceneVLM() if cfg.vlm_enabled else None  # Phase 6
         self._frame_idx = 0
         self._ag_samples: dict[int, list[AgeGender]] = {}   # track_id -> raw votes
-        self._age_cache: dict[int, tuple[str, str]] = {}    # track_id -> (age_group, gender)
+        self._age_cache: dict[int, tuple[float | None, str | None, str | None]] = {}    # track_id -> (age, age_group, gender)
         self._last_seen: dict[int, float] = {}
+
+    def reset(self) -> None:
+        """Forget every per-track identity and start counting from scratch.
+
+        Needed whenever the input switches to an unrelated stream (a new video, a
+        reconnected camera): ByteTrack would otherwise try to associate the first
+        frames of the new scene with the last frames of the old one.
+        """
+        self.tracker.reset()
+        self.dwell = DwellTracker()
+        self._frame_idx = 0
+        self._ag_samples.clear()
+        self._age_cache.clear()
+        self._last_seen.clear()
 
     def start(self):
         if self.vlm:
@@ -67,25 +82,25 @@ class Pipeline:
         from scene_vlm import SceneContext
         return SceneContext()
 
-    def _reduce_votes(self, samples: list[tuple[AgeGender, int]]) -> tuple[str | None, str]:
+    def _reduce_votes(self, samples: list[tuple[AgeGender, int]]) -> tuple[float | None, str | None, str | None]:
         """Collapse several noisy per-frame estimates into one answer.
 
         Gender by confidence-weighted vote over every sample; age by median over
-        only the samples whose crop was big enough to be worth trusting. The nets
-        are jumpy frame to frame — especially on the partial, motion-blurred face
-        you get the instant someone walks into shot — so a single estimate is a
-        coin flip and the first estimate is the worst one to keep.
+        only the samples whose crop was big enough to be worth trusting.
         """
+        if not samples:
+            return None, None, None
         scores: dict[str, float] = {}
         for ag, _ in samples:
             scores[ag.gender] = scores.get(ag.gender, 0.0) + ag.gender_conf
         gender = max(scores, key=scores.__getitem__)
 
         if not self.cfg.age_enabled:
-            return None, gender
+            return None, None, gender
         usable = [ag.age for ag, px in samples if px >= self.cfg.min_face_px_for_age]
-        age_group = map_age_group(float(np.median(usable))) if usable else None
-        return age_group, gender
+        approx_age = round(float(np.median(usable)), 1) if usable else None
+        age_group = map_age_group(approx_age) if approx_age is not None else None
+        return approx_age, age_group, gender
 
     def _attribute_crop(self, frame_bgr: np.ndarray, source_frame: np.ndarray | None,
                         bbox: tuple[int, int, int, int]) -> np.ndarray:
@@ -103,7 +118,7 @@ class Pipeline:
         x1, y1, x2, y2 = bbox
         return crop_face(source_frame, (int(x1 * sx), int(y1 * sy), int(x2 * sx), int(y2 * sy)))
 
-    def _age_gender_voted(self, track_id: int, face_bgr: np.ndarray) -> tuple[str | None, str | None]:
+    def _age_gender_voted(self, track_id: int, face_bgr: np.ndarray) -> tuple[float | None, str | None, str | None]:
         """Sample age/gender periodically until enough votes, then hold the result."""
         samples = self._ag_samples.setdefault(track_id, [])
         due = (
@@ -116,13 +131,23 @@ class Pipeline:
             if ag is not None:
                 samples.append((ag, int(face_bgr.shape[0])))
                 self._age_cache[track_id] = self._reduce_votes(samples)
-        return self._age_cache.get(track_id, (None, None))
+        return self._age_cache.get(track_id, (None, None, None))
 
     def _retire(self, live_ids: set[int], now: float) -> None:
-        """Close gaze sessions for vanished tracks and expire their cached state."""
+        """Close gaze sessions for vanished tracks and expire their cached state.
+
+        Live ids are stamped FIRST. The loop used to only visit keys already in
+        `_last_seen`, and nothing else ever wrote to that dict — so it stayed
+        empty for the whole run, no track ever expired, `_ag_samples` /
+        `_age_cache` / the dwell dicts grew without bound, and a track_id
+        recycled by ByteTrack inherited the previous person's dwell and
+        demographics.
+        """
+        for track_id in live_ids:
+            self._last_seen[track_id] = now
+
         for track_id in list(self._last_seen):
             if track_id in live_ids:
-                self._last_seen[track_id] = now
                 continue
             self.dwell.close(track_id, now)
             if now - self._last_seen[track_id] > self.cfg.track_expiry_seconds:
@@ -186,12 +211,13 @@ class Pipeline:
                 print(f"      - Bước 3.2: Ước lượng góc đầu (Yaw: {yaw_val}°, Pitch: {pitch_val}°)")
             
             # Bước 5: Dự đoán tuổi & giới tính (MiVOLO / Caching Vote)
-            age_group, gender = self._age_gender_voted(
+            approx_age, age_group, gender = self._age_gender_voted(
                 t.track_id, self._attribute_crop(frame_bgr, source_frame, t.bbox)
             )
             gender_vn = "Nam" if gender == "M" else ("Nữ" if gender == "F" else "Chưa rõ")
+            age_str = f"~{round(approx_age)} ({age_group})" if approx_age is not None else (age_group or "Chưa rõ")
             if verbose:
-                print(f"      - Bước 3.3: Phân tích giới tính/tuổi: {gender_vn} ({age_group})")
+                print(f"      - Bước 3.3: Phân tích giới tính/tuổi: {gender_vn} ({age_str})")
 
             # Bước 6: Đánh giá trạng thái nhìn (Gaze Attention) & Dwell time
             attentive_now = is_attentive(pose) if pose is not None else False
@@ -203,6 +229,7 @@ class Pipeline:
                 PersonMeta(
                     track_id=t.track_id,
                     bbox=t.bbox,
+                    age=approx_age,
                     age_group=age_group,
                     gender=gender,
                     yaw=pose.yaw if pose else None,

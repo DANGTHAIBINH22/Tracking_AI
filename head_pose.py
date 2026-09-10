@@ -15,27 +15,38 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from configs import CFG
 
 # 3D reference face model (mm), 6 stable points. Standard values shared across
 # solvePnP head-pose implementations: nose tip, chin, eye corners, mouth corners.
-MODEL_POINTS_3D = np.array([
-    (0.0, 0.0, 0.0),          # nose tip
-    (0.0, -330.0, -65.0),     # chin
-    (-225.0, 170.0, -135.0),  # left eye outer corner
-    (225.0, 170.0, -135.0),   # right eye outer corner
-    (-150.0, -150.0, -125.0), # left mouth corner
-    (150.0, -150.0, -125.0),  # right mouth corner
-], dtype=np.float64)
+MODEL_POINTS_3D = np.array(
+    [
+        (0.0, 0.0, 0.0),  # nose tip
+        (0.0, -330.0, -65.0),  # chin
+        (-225.0, 170.0, -135.0),  # left eye outer corner
+        (225.0, 170.0, -135.0),  # right eye outer corner
+        (-150.0, -150.0, -125.0),  # left mouth corner
+        (150.0, -150.0, -125.0),  # right mouth corner
+    ],
+    dtype=np.float64,
+)
 
 # MediaPipe Face Mesh indices matching the 6 model points above.
-LANDMARK_IDS = {"nose": 1, "chin": 199, "l_eye": 33, "r_eye": 263, "l_mouth": 61, "r_mouth": 291}
+LANDMARK_IDS = {
+    "nose": 1,
+    "chin": 199,
+    "l_eye": 33,
+    "r_eye": 263,
+    "l_mouth": 61,
+    "r_mouth": 291,
+}
 
 
 @dataclass
 class HeadPose:
-    yaw: float    # left-right
+    yaw: float  # left-right
     pitch: float  # up-down
-    roll: float   # tilt
+    roll: float  # tilt
 
 
 def camera_matrix(frame_w: int, frame_h: int) -> np.ndarray:
@@ -68,20 +79,35 @@ class HeadPoseEstimator:
     def _ensure_mesh(self):
         if self._mesh is None:
             import mediapipe as mp
+
             # static_image_mode=True: we are fed an independent, already-detected
             # face crop per track each frame, not a continuous single-face video.
             # In tracking mode the one shared mesh would thrash between tracks.
             self._mesh = mp.solutions.face_mesh.FaceMesh(
                 static_image_mode=True,
                 max_num_faces=1,
-                refine_landmarks=True,
+                refine_landmarks=False,
                 min_detection_confidence=0.5,
             )
 
     def landmarks(self, face_rgb: np.ndarray):
-        """Return 468 normalised (x, y, z) landmarks, or None if no face."""
+        """Return 468 normalised (x, y, z) landmarks, or None if no face.
+
+        Degenerate crops are rejected before MediaPipe sees them: its
+        ImageToTensorCalculator RET_CHECKs on a zero/near-zero ROI and raises a
+        RuntimeError out of .process(), which would take the whole frame loop
+        down for one bad bbox at the edge of frame.
+        """
+        if face_rgb is None or face_rgb.size == 0:
+            return None
+        h, w = face_rgb.shape[:2]
+        if min(h, w) < CFG.min_face_px_for_pose:
+            return None
         self._ensure_mesh()
-        results = self._mesh.process(face_rgb)
+        try:
+            results = self._mesh.process(face_rgb)
+        except Exception:
+            return None
         if not results.multi_face_landmarks:
             return None
         return results.multi_face_landmarks[0].landmark
@@ -107,7 +133,9 @@ class HeadPoseEstimator:
         K = camera_matrix(w, h)
         dist = np.zeros((4, 1), dtype=np.float64)
 
-        ok, rvec, tvec = cv2.solvePnP(MODEL_POINTS_3D, pts2d, K, dist, flags=cv2.SOLVEPNP_ITERATIVE)
+        ok, rvec, tvec = cv2.solvePnP(
+            MODEL_POINTS_3D, pts2d, K, dist, flags=cv2.SOLVEPNP_ITERATIVE
+        )
         if not ok:
             return None
 
@@ -123,4 +151,3 @@ class HeadPoseEstimator:
         roll = fold_euler(float(euler[2, 0]))
 
         return HeadPose(yaw=yaw, pitch=pitch, roll=roll)
-

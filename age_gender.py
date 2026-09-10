@@ -77,31 +77,56 @@ def _letterbox(img: np.ndarray, size: int = INPUT_SIZE) -> np.ndarray:
 
 
 class AgeGenderEstimator:
-    def __init__(self, weights=CFG.mivolo_weights):
+    def __init__(self, weights=CFG.mivolo_weights, ckpt=getattr(CFG, "mivolo_ckpt", None)):
         self.weights = weights
+        self.ckpt = ckpt
         self._sess = None
+        self._torch_model = None
         self._input_name = None
+        self._input_size = INPUT_SIZE
         self._model_failed = False
+        self._mode = None  # "onnx" or "torch"
 
     def _ensure_model(self):
-        if self._sess is not None or self._model_failed:
+        if self._sess is not None or self._torch_model is not None or self._model_failed:
             return
         from pathlib import Path
         weights_path = Path(self.weights)
-        if not weights_path.exists():
-            print(f"[AgeGender] CẢNH BÁO: Không tìm thấy file weights MiVOLO tại: {self.weights}. Khâu ước lượng tuổi/giới tính sẽ được bỏ qua.")
-            self._model_failed = True
-            return
-        try:
-            import onnxruntime as ort
-            opts = ort.SessionOptions()
-            opts.log_severity_level = 3
-            self._sess = ort.InferenceSession(str(self.weights), opts, providers=["CPUExecutionProvider"])
-            self._input_name = self._sess.get_inputs()[0].name
-        except Exception as e:
-            print(f"[AgeGender] CẢNH BÁO: Lỗi khởi tạo mô hình MiVOLO ({e}). Khâu ước lượng tuổi/giới tính sẽ được bỏ qua.")
-            self._sess = None
-            self._model_failed = True
+        ckpt_path = Path(self.ckpt) if self.ckpt else None
+
+        # 1. Check ONNX weights
+        if weights_path.exists():
+            try:
+                import onnxruntime as ort
+                opts = ort.SessionOptions()
+                opts.log_severity_level = 3
+                self._sess = ort.InferenceSession(str(self.weights), opts, providers=["CPUExecutionProvider"])
+                inp = self._sess.get_inputs()[0]
+                self._input_name = inp.name
+                side = inp.shape[-1] if isinstance(inp.shape[-1], int) else None
+                self._input_size = side or INPUT_SIZE
+                self._mode = "onnx"
+                print(f"[AgeGender] Đã nạp thành công mô hình MiVOLO ONNX từ: {self.weights}")
+                return
+            except Exception as e:
+                print(f"[AgeGender] CẢNH BÁO: Lỗi khởi tạo mô hình MiVOLO ONNX ({e}). Thử nạp PyTorch checkpoint...")
+
+        # 2. Check PyTorch checkpoint (.pth.tar)
+        if ckpt_path and ckpt_path.exists():
+            try:
+                import torch
+                from mivolo.model.mi_volo import MiVOLO
+                dev = CFG.device if hasattr(CFG, "device") else ("mps" if torch.backends.mps.is_available() else "cpu")
+                self._torch_model = MiVOLO(str(ckpt_path), device=dev, half=(dev != "cpu"))
+                self._mode = "torch"
+                self._input_size = self._torch_model.input_size
+                print(f"[AgeGender] Đã nạp thành công mô hình MiVOLO PyTorch SOTA từ: {ckpt_path} (Device: {dev})")
+                return
+            except Exception as e:
+                print(f"[AgeGender] CẢNH BÁO: Lỗi khởi tạo MiVOLO PyTorch ({e}).")
+
+        print(f"[AgeGender] CẢNH BÁO: Không tìm thấy weights MiVOLO ({self.weights} hoặc {self.ckpt}). Bỏ qua ước lượng tuổi/giới tính.")
+        self._model_failed = True
 
     def estimate(self, face_bgr: np.ndarray, track_id: int = 0) -> AgeGender | None:
         """Estimate age/gender from a cropped face image."""
@@ -113,29 +138,59 @@ class AgeGenderEstimator:
             return None
 
         self._ensure_model()
-        if self._sess is None:
-            # Sinh dự đoán giả lập (Mock) ổn định theo track_id
+        if self._mode is None:
+            if not CFG.allow_mock_attributes:
+                return None
             import random
-            state = random.getstate()
-            random.seed(track_id)
-            gender = random.choice(["M", "F"])
-            age = random.randint(18, 60)
-            random.setstate(state)
+            rng = random.Random(track_id)
+            age = rng.randint(18, 60)
             return AgeGender(
                 age=float(age),
                 age_group=map_age_group(age),
-                gender=gender,
-                gender_conf=0.85 + (track_id % 15) / 100.0
+                gender=rng.choice(["M", "F"]),
+                gender_conf=0.85 + (track_id % 15) / 100.0,
             )
+
+        if self._mode == "torch" and self._torch_model is not None:
+            try:
+                import torch
+                from mivolo.data.misc import prepare_classification_images
+                dev = self._torch_model.device
+                face_input = prepare_classification_images(
+                    [face_bgr], self._input_size, self._torch_model.data_config["mean"], self._torch_model.data_config["std"], device=dev
+                )
+                body_input = prepare_classification_images(
+                    [None], self._input_size, self._torch_model.data_config["mean"], self._torch_model.data_config["std"], device=dev
+                )
+                model_input = torch.cat((face_input, body_input), dim=1)
+                out = self._torch_model.inference(model_input)
+                gender_probs = out[:, :2].softmax(-1)
+                gender_idx = 0 if gender_probs[0, 0] >= gender_probs[0, 1] else 1
+                gender = GENDER_LIST[gender_idx]
+                gender_conf = float(gender_probs[0, gender_idx].item())
+                age_raw = out[0, 2].item()
+                age = float(round(age_raw * (self._torch_model.meta.max_age - self._torch_model.meta.min_age) + self._torch_model.meta.avg_age, 1))
+                return AgeGender(age=age, age_group=map_age_group(age), gender=gender, gender_conf=gender_conf)
+            except Exception as e:
+                print(f"[AgeGender] CẢNH BÁO: Lỗi suy luận MiVOLO PyTorch ({e}).")
+                return None
+
+        # ONNX mode
         import cv2
 
-        letterboxed = _letterbox(face_bgr, INPUT_SIZE)
+        letterboxed = _letterbox(face_bgr, self._input_size)
         rgb = cv2.cvtColor(letterboxed, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         normed = (rgb - IMAGENET_MEAN) / IMAGENET_STD
         blob = np.transpose(normed, (2, 0, 1))[np.newaxis, ...].astype(np.float32)
 
-        age, p_male, p_female = self._sess.run(None, {self._input_name: blob})[0][0]
-        age = float(age)
+        try:
+            age, p_male, p_female = self._sess.run(None, {self._input_name: blob})[0][0]
+        except Exception as e:
+            print(f"[AgeGender] CẢNH BÁO: Lỗi suy luận MiVOLO ONNX ({e}).")
+            self._sess = None
+            self._model_failed = True
+            return None
+        age = float(round(age, 1))
         gender_idx = 0 if p_male >= p_female else 1
         gender = GENDER_LIST[gender_idx]
         gender_conf = float(p_male if gender_idx == 0 else p_female)

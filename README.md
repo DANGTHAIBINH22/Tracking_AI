@@ -151,3 +151,139 @@ Chúng ta chạy các script đánh giá độc lập nằm trong thư mục `ev
   ```bash
   uv run python eval/eval_fps.py
   ```
+
+---
+
+## III. Ứng dụng Standee: FastAPI + Next.js + PostgreSQL
+
+Lớp ứng dụng nằm trên lõi CV, gọi đúng **một** điểm nối `Pipeline.process(frame) -> list[PersonMeta]`.
+Không có gì trong `pipeline.py` bị sửa để phục vụ app.
+
+```
+web/ (Next.js)                 server/ (FastAPI)                  lõi CV (không đổi)
+ ├ /        bảng điều khiển  ─┐  ├ player.py   đồng hồ playlist    preprocess → FaceTracker
+ ├ /ads     thư viện QC       ├─▶ engine.py   1 luồng camera  ────▶ crop → HeadPose → attention
+ └ /player  màn hình chiếu   ─┘  ├ reports.py  reach / impression   → AgeGender
+                                 └ db.py       PostgreSQL
+```
+
+> **Dự án chạy trên nền web.** Không có bản app desktop hay mobile — toàn bộ thao tác
+> (tải quảng cáo, bật camera, xem số liệu, chiếu lên màn hình) đều nằm trong trình duyệt.
+> `run_webcam.py` và `run_video.py` chỉ là **công cụ debug** pipeline bằng cửa sổ OpenCV,
+> phục vụ đo đạc cho báo cáo, không thuộc luồng sản phẩm.
+
+### 0. Chạy nhanh (một lệnh)
+
+```bash
+./run_web.sh
+```
+
+Script tự kiểm tra PostgreSQL, tạo database nếu chưa có, cài phụ thuộc lần đầu, ghi
+`web/.env.local` cho đúng cổng rồi chạy song song API và dashboard. Ctrl-C tắt cả hai.
+
+| Địa chỉ | Nội dung |
+| :--- | :--- |
+| <http://localhost:3000> | Bảng điều khiển — số liệu trực tiếp và báo cáo từng quảng cáo (chỉ xem) |
+| <http://localhost:3000/ads> | Thư viện quảng cáo — tải ảnh/video lên, sắp thứ tự, đặt thời lượng |
+| <http://localhost:3000/admin> | **Quản trị** — chọn nguồn camera, bật/tắt phân tích, điều khiển phát |
+| <http://localhost:3000/player> | Màn hình chiếu — mở trên máy gắn với standee, nhấn `F` để toàn màn hình |
+| <http://localhost:8000/docs> | Tài liệu API tự sinh |
+
+### Hai chế độ camera
+
+Chọn ở trang Quản trị. Hai chế độ **loại trừ nhau** — hai nguồn cùng đổ vào một
+`Pipeline` sẽ trộn hai bối cảnh vào chung một tập track id và làm hỏng mọi số đo.
+
+| | Trình duyệt (`getUserMedia`) | Máy chủ (OpenCV) |
+| :--- | :--- | :--- |
+| Camera nằm ở | máy đang mở `/player` | máy chạy FastAPI |
+| Đường đi | JPEG qua `ws://…/ws/ingest` | `cv2.VideoCapture` trong tiến trình |
+| Hợp khi | mỗi màn hình một camera, máy chủ đặt chỗ khác | standee và máy chủ là cùng một máy |
+| Đánh đổi | tốn băng thông, ~12 fps | nhanh nhất, nhưng camera phải cắm đúng máy |
+
+Ở chế độ trình duyệt, `/player` **tự bật camera** khi mở và tự khởi động phân tích —
+người xem không thấy gì ngoài quảng cáo (thẻ video ẩn ở kích thước 1px). Nhấn `H`
+để xem trạng thái camera, `F` để toàn màn hình.
+
+> ⚠️ **Trình duyệt chỉ cho phép mở camera trên `localhost` hoặc HTTPS.** Mở
+> `/player` bằng địa chỉ LAN kiểu `http://192.168.1.x:3000` sẽ *không* có camera —
+> đó là quy định của trình duyệt, không phải lỗi cấu hình. Đặt HTTPS cho máy chủ,
+> hoặc chạy trình duyệt ngay trên máy đó.
+
+Mỗi lúc chỉ **một** màn hình được gửi camera lên. Màn hình thứ hai sẽ bị từ chối và
+báo rõ trên HUD; nó tự thử lại nên khi màn hình đầu tắt thì nó tiếp quản. Trang
+Quản trị hiển thị màn hình nào đang gửi, ở bao nhiêu fps.
+
+Ba mục dưới đây là cách chạy từng phần thủ công, khi cần gỡ lỗi riêng lẻ.
+
+### 1. Chuẩn bị PostgreSQL
+
+```bash
+docker compose up -d          # hoặc: brew services start postgresql@14 && createdb signage
+export DATABASE_URL=postgresql://localhost:5432/signage
+```
+
+Bảng được tạo tự động lúc khởi động (`server/db.py`), không cần chạy migration.
+
+### 2. Chạy backend
+
+```bash
+uv sync
+uv run uvicorn server.main:app --reload --port 8000
+```
+
+Tài liệu API tự sinh tại <http://localhost:8000/docs>.
+
+| Endpoint | Ý nghĩa |
+| :--- | :--- |
+| `GET/POST/PATCH/DELETE /api/ads` | Thư viện quảng cáo (upload ảnh/video, đổi tên, thời lượng, bật/tắt) |
+| `PUT /api/ads/order` | Sắp xếp thứ tự chiếu |
+| `POST /api/player/start\|stop\|skip` | Điều khiển playlist |
+| `GET /api/player/now-playing` | Quảng cáo đang trên màn hình + thời gian còn lại |
+| `POST /api/capture/start\|stop` | Bật/tắt camera (`"0"` = webcam, hoặc đường dẫn video) |
+| `GET /api/capture/stream.mjpg` | Luồng MJPEG đã vẽ bbox/góc đầu/attention |
+| `GET /api/analytics/live` | Ảnh chụp tức thời: đang có mặt, đang nhìn, danh sách track |
+| `GET /api/analytics/summary` | Báo cáo theo từng quảng cáo |
+| `GET /api/analytics/timeline` | Nhật ký từng lượt chiếu |
+| `GET /api/analytics/export.csv` | Xuất toàn bộ impression ra CSV |
+| `WS /ws/live` | Đẩy số liệu trực tiếp mỗi giây |
+
+### 3. Chạy frontend
+
+```bash
+cd web
+npm install
+npm run dev            # http://localhost:3000
+```
+
+`web/.env.local` chỉ cần một biến: `NEXT_PUBLIC_API_BASE=http://localhost:8000`.
+
+### 4. Cách đếm (quan trọng khi viết báo cáo)
+
+Hệ thống tách bạch hai con số thường bị gộp làm một:
+
+| Chỉ số | Định nghĩa |
+| :--- | :--- |
+| **Reach** (đi qua) | Số người có mặt trước màn hình >= `min_presence_seconds` (0.5s) trong lúc quảng cáo đang chiếu. Đây là footfall. |
+| **Impression** (xem thực) | Tập con của reach, những người thật sự **nhìn** màn hình >= `min_attention_seconds` (1.0s), xác định bằng góc đầu yaw/pitch từ solvePnP. |
+| **Attention rate** | `impression / reach` — chỉ số đáng tối ưu cho một mẫu quảng cáo. |
+| **Dwell** | Tổng số giây người xem thực sự nhìn, cộng dồn theo từng quảng cáo. |
+
+Một người đứng xem ba quảng cáo liên tiếp sinh ra **ba** impression (mỗi lượt chiếu một
+dòng), nhưng nhìn đi nhìn lại trong cùng một lượt chiếu vẫn chỉ là **một** — ràng buộc
+`UNIQUE (airing_id, track_id)` trong bảng `impressions` bảo đảm điều đó.
+
+Backend giữ đồng hồ playlist, không phải trình duyệt. Nhờ vậy số liệu và nội dung trên
+màn hình không bao giờ lệch nhau, kể cả khi tab bị tải lại hay mở nhiều màn hình.
+
+### 5. Giới hạn cần nêu thẳng trong báo cáo
+
+- Thiếu `models/mivolo_age_gender.onnx` thì cột **tuổi/giới tính để trống**, hệ thống
+  không đoán bừa. Muốn có dữ liệu giả để thử giao diện, bật `CFG.allow_mock_attributes`
+  — và phải nói rõ đó là dữ liệu giả.
+- Nhánh VLM (`scene_vlm.py`) mặc định **tắt**; khi tắt, `SceneContext` rỗng chứ không
+  báo "sunny".
+- Attention dựa trên head pose (hướng đầu), không phải gaze (hướng mắt). Người quay mặt
+  về màn hình nhưng liếc chỗ khác vẫn bị tính là đang nhìn.
+- Với khuôn mặt nhỏ hơn `CFG.min_face_px_for_pose` (16px), MediaPipe Face Mesh không
+  chạy nên attention của track đó là 0 — cần đặt camera đủ gần.

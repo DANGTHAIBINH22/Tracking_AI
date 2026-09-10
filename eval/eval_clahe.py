@@ -50,11 +50,12 @@ def run_evaluation(image_path=None):
     CFG.conf_threshold = 0.3
     detector = FaceDetector()
     
-    rgb_no_clahe = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    rgb_clahe = cv2.cvtColor(img_clahe, cv2.COLOR_BGR2RGB)
-    
-    faces_no_clahe = detector.detect(rgb_no_clahe)
-    faces_clahe = detector.detect(rgb_clahe)
+    # FaceDetector.detect() takes BGR and converts internally where a stage needs
+    # RGB. Handing it an already-converted frame swapped R and B for both arms,
+    # which is a change to the input distribution, not to the lighting — exactly
+    # the confound this experiment is supposed to isolate.
+    faces_no_clahe = detector.detect(img_bgr)
+    faces_clahe = detector.detect(img_clahe)
     
     # Đo độ tương phản (Độ lệch chuẩn std của kênh L)
     l_no_clahe = cv2.split(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2LAB))[0]

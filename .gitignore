@@ -22,3 +22,19 @@ outputs/
 .DS_Store
 .idea/
 .vscode/
+
+# Secrets — connection strings, keys. Never commit these.
+# .env.example is the tracked template and must survive the rule above it.
+.env
+.env.*
+!.env.example
+web/.env.local
+
+# Signage app
+# NB: no trailing comments on a pattern line — git has no inline comments, so
+# `media/  # uploaded ad creatives` was one literal pattern that matched nothing
+# and let every uploaded creative into the repo.
+media/
+web/node_modules/
+web/.next/
+web/out/

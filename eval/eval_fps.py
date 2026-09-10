@@ -8,7 +8,7 @@ import numpy as np
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from pipeline import Pipeline
-from preprocess import preprocess
+from preprocess import preprocess, to_rgb
 from tracker import FaceTracker
 from head_pose import HeadPoseEstimator
 from age_gender import AgeGenderEstimator
@@ -40,7 +40,7 @@ def benchmark_pipeline(num_frames=100):
     if tracks:
         face_crop = frame_prep[tracks[0].bbox[1]:tracks[0].bbox[3], tracks[0].bbox[0]:tracks[0].bbox[2]]
         if face_crop.size > 0:
-            pose_estimator.estimate(face_crop)
+            pose_estimator.estimate(to_rgb(face_crop))
             age_gender.estimate(face_crop)
             
     # Bắt đầu đo
@@ -71,9 +71,11 @@ def benchmark_pipeline(num_frames=100):
             t = tracks[0]
             face_bgr = prep[t.bbox[1]:t.bbox[3], t.bbox[0]:t.bbox[2]]
             if face_bgr.size > 0:
-                # Pose
+                # Pose — estimate() runs MediaPipe, which needs RGB. Passing BGR
+                # here made the stage fail out early on some frames and quietly
+                # under-report its own cost.
                 t0 = time.perf_counter()
-                pose_estimator.estimate(face_bgr)
+                pose_estimator.estimate(to_rgb(face_bgr))
                 times["pose_estimation"] += time.perf_counter() - t0
                 
                 # Age/Gender

@@ -23,9 +23,15 @@ from configs import CFG
 
 @dataclass
 class SceneContext:
-    weather: str | None = "sunny"
-    crowd_activity: str | None = "standing"
-    objects: list[str] = field(default_factory=lambda: ["none"])
+    """Latest ambient context. All fields None/empty until a VQA pass has run.
+
+    The defaults used to be "sunny" / "standing" / ["none"], which meant a run
+    with the VLM branch disabled still wrote a confident-looking weather column
+    into every CSV row.
+    """
+    weather: str | None = None
+    crowd_activity: str | None = None
+    objects: list[str] = field(default_factory=list)
 
 
 class SceneVLM:
@@ -41,11 +47,12 @@ class SceneVLM:
         self._tokenizer = None
         self._next_frame = None
         self.use_mock = True
+        self._load_failed = False
         self.device = "cpu"
 
     def _ensure_model(self):
         """Lazy load the model in the worker thread to avoid blocking startup."""
-        if self._model is not None or not self.use_mock:
+        if self._model is not None or self._load_failed:
             return
             
         try:
@@ -56,14 +63,14 @@ class SceneVLM:
             self.device = "cuda" if torch.cuda.is_available() else "cpu"
             if torch.backends.mps.is_available():
                 self.device = "mps"
-                
+
             print(f"[VLM] Đang tải Moondream ({CFG.device}) trên thiết bị {self.device}...")
             self._tokenizer = AutoTokenizer.from_pretrained(
-                CFG.vlm_model_id if hasattr(CFG, "vlm_model_id") else "vikhyat/moondream2",
+                CFG.vlm_model_id if hasattr(CFG, "vlm_model_id") else "vikhyatk/moondream2",
                 trust_remote_code=True
             )
             self._model = AutoModelForCausalLM.from_pretrained(
-                CFG.vlm_model_id if hasattr(CFG, "vlm_model_id") else "vikhyat/moondream2",
+                CFG.vlm_model_id if hasattr(CFG, "vlm_model_id") else "vikhyatk/moondream2",
                 trust_remote_code=True,
                 torch_dtype=torch.float16 if self.device != "cpu" else torch.float32
             ).to(self.device)
@@ -71,8 +78,10 @@ class SceneVLM:
             self.use_mock = False
             print("[VLM] Đã tải Moondream VLM thành công. Hệ thống chạy thật.")
         except Exception as e:
-            print(f"[VLM] Không tải được Moondream VLM ({e}). Sử dụng chế độ giả lập (Mock).")
+            self._load_failed = True
             self.use_mock = True
+            mode = "chế độ giả lập (Mock)" if CFG.allow_mock_attributes else "bối cảnh rỗng (không suy đoán)"
+            print(f"[VLM] Không tải được Moondream VLM ({e}). Sử dụng {mode}.")
 
     @property
     def latest(self) -> SceneContext:
@@ -80,15 +89,27 @@ class SceneVLM:
             return self._latest
 
     def submit_frame(self, frame_bgr) -> None:
-        """Hand the newest full frame to the worker (downscaled inside)."""
+        """Hand the newest full frame to the worker (downscaled inside).
+
+        Called from the real-time loop on every frame, so it must do as close to
+        nothing as possible. Two things it deliberately does NOT do any more:
+        hold the lock across a resize+copy (the worker holds the same lock), and
+        prepare a frame the worker has not asked for — one pass runs every
+        `period_seconds`, so ~30x per second of resizing was pure waste.
+        """
         with self._lock:
-            # Downscale frame for speed
-            h, w = frame_bgr.shape[:2]
-            scale = 480 / max(h, w)
-            if scale < 1.0:
-                self._next_frame = cv2.resize(frame_bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-            else:
-                self._next_frame = frame_bgr.copy()
+            if self._next_frame is not None:
+                return  # the worker still owes us a pass on the last one
+
+        h, w = frame_bgr.shape[:2]
+        scale = 480 / max(h, w)
+        if scale < 1.0:
+            small = cv2.resize(frame_bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        else:
+            small = frame_bgr.copy()
+
+        with self._lock:
+            self._next_frame = small
 
     def start(self) -> None:
         """Spawn worker thread running the VQA loop."""
@@ -117,19 +138,18 @@ class SceneVLM:
                     self._next_frame = None  # tiêu thụ frame
             
             if frame is not None:
-                if self.use_mock:
+                if not self.use_mock:
+                    new_context = self._run_moondream_vqa(frame)
+                elif CFG.allow_mock_attributes:
                     new_context = self._generate_mock_context()
                 else:
-                    new_context = self._run_moondream_vqa(frame)
-                
+                    new_context = SceneContext()  # honest "unknown"
+
                 with self._lock:
                     self._latest = new_context
-            
-            # Ngủ ngắt quãng để phản hồi dừng nhanh
-            for _ in range(int(self.period_seconds)):
-                if self._stop.is_set():
-                    break
-                time.sleep(1.0)
+
+            # Event.wait returns as soon as stop() fires, at any granularity.
+            self._stop.wait(self.period_seconds)
 
     def _generate_mock_context(self) -> SceneContext:
         """Giả lập bối cảnh ngẫu nhiên."""

@@ -64,7 +64,13 @@ class FaceTracker:
         return tracks
 
     def reset(self):
-        """Reset the internal tracking state (useful when starting a new video)."""
-        if self._model is not None and hasattr(self._model, "predictor") and self._model.predictor is not None:
-            if hasattr(self._model.predictor, "trackers"):
-                self._model.predictor.trackers = []
+        """Reset the internal tracking state (useful when starting a new video).
+
+        The attribute has to be REMOVED, not emptied. ultralytics' on_predict_start
+        short-circuits when `persist=True` and the predictor already has a
+        `trackers` attribute, so an empty list means it never rebuilds one and the
+        next .track() call dies on `predictor.trackers[0]` with IndexError.
+        """
+        predictor = getattr(self._model, "predictor", None) if self._model is not None else None
+        if predictor is not None and hasattr(predictor, "trackers"):
+            del predictor.trackers

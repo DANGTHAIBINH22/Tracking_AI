@@ -12,8 +12,14 @@ from configs import CFG
 
 
 def crop_face(frame_bgr: np.ndarray, bbox: tuple[int, int, int, int],
-              margin: float = CFG.face_margin) -> np.ndarray:
-    """Crop with margin, clamped to [0, W] x [0, H]."""
+              margin: float | None = None) -> np.ndarray:
+    """Crop with margin, clamped to [0, W] x [0, H].
+
+    `margin` defaults to CFG.face_margin read at CALL time, not import time — a
+    default argument would freeze whatever the config held when this module was
+    first imported, which silently ignores every later retune.
+    """
+    margin = CFG.face_margin if margin is None else margin
     h, w = frame_bgr.shape[:2]
     x1, y1, x2, y2 = bbox
     bw, bh = x2 - x1, y2 - y1

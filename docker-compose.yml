@@ -1,0 +1,25 @@
+# Postgres for the signage backend. Only needed if you do not already have one
+# running locally (`brew services start postgresql@14` works just as well).
+#
+#   docker compose up -d
+#   export DATABASE_URL=postgresql://signage:signage@localhost:5432/signage
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: signage-db
+    environment:
+      POSTGRES_USER: signage
+      POSTGRES_PASSWORD: signage
+      POSTGRES_DB: signage
+    ports:
+      - "5432:5432"
+    volumes:
+      - signage-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U signage -d signage"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  signage-pgdata:
