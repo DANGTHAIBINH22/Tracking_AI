@@ -46,6 +46,11 @@ class ScreenPublic(BaseModel):
     pairing_code: str | None = None
     last_seen: float | None = None
     created_at: float
+    playlist_id: int | None = None
+    playlist_name: str | None = None
+    user_id: int | None = None
+    account_name: str | None = None
+    account_username: str | None = None
 
 
 class ScreenPairRequest(BaseModel):
@@ -161,6 +166,12 @@ class PlaylistPublic(BaseModel):
     item_count: int = 0
     total_duration: float = 0.0
     items: list[PlaylistItemPublic] = []
+    assigned_screen_ids: list[int] = []
+    assigned_screen_names: list[str] = []
+
+
+class PlaylistActivateRequest(BaseModel):
+    screen_ids: list[int] = []
 
 
 class PlaylistCreate(BaseModel):

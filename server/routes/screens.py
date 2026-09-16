@@ -100,23 +100,48 @@ def verify_screen_token(token: str = Query(...)) -> dict:
     """Verify that a screen token is valid and still authorized."""
     now = time.time()
     row = db.query_one(
-        "SELECT id, name, location, status FROM screens WHERE screen_token = %s",
+        """SELECT s.id, s.name, s.location, s.status, s.playlist_id, s.user_id,
+                  p.name AS playlist_name,
+                  COALESCE(u.full_name, u.username, 'Quản trị viên') AS account_name,
+                  u.username AS account_username
+           FROM screens s
+           LEFT JOIN playlists p ON s.playlist_id = p.id
+           LEFT JOIN users u ON s.user_id = u.id
+           WHERE s.screen_token = %s""",
         (token.strip(),),
     )
     if not row or row["status"] != "paired":
         return {"valid": False, "status": row["status"] if row else "not_found"}
 
     db.execute("UPDATE screens SET last_seen = %s WHERE id = %s", (now, row["id"]))
-    return {"valid": True, "name": row["name"], "location": row["location"]}
+    return {
+        "valid": True,
+        "id": row["id"],
+        "name": row["name"],
+        "location": row["location"],
+        "playlist_id": row["playlist_id"],
+        "playlist_name": row["playlist_name"],
+        "user_id": row["user_id"],
+        "account_name": row["account_name"],
+        "account_username": row["account_username"],
+    }
 
 
 # ---------- Admin Endpoints ----------
 
 
 @router.get("", response_model=list[ScreenPublic])
-def list_screens() -> list[ScreenPublic]:
-    """List all registered screens."""
-    rows = db.query("SELECT * FROM screens ORDER BY id DESC")
+def list_screens(user: Annotated[dict, Depends(get_current_user)]) -> list[ScreenPublic]:
+    """List all registered screens, including account owner details."""
+    rows = db.query(
+        """SELECT s.*, p.name AS playlist_name,
+                  COALESCE(u.full_name, u.username, 'Quản trị viên') AS account_name,
+                  u.username AS account_username
+           FROM screens s
+           LEFT JOIN playlists p ON s.playlist_id = p.id
+           LEFT JOIN users u ON s.user_id = u.id
+           ORDER BY s.id DESC"""
+    )
     return [
         ScreenPublic(
             id=r["id"],
@@ -126,13 +151,21 @@ def list_screens() -> list[ScreenPublic]:
             pairing_code=r["pairing_code"],
             last_seen=r["last_seen"],
             created_at=r["created_at"],
+            playlist_id=r.get("playlist_id"),
+            playlist_name=r.get("playlist_name"),
+            user_id=r.get("user_id"),
+            account_name=r.get("account_name"),
+            account_username=r.get("account_username"),
         )
         for r in rows
     ]
 
 
 @router.post("/pair", response_model=ScreenPublic)
-def pair_screen(body: ScreenPairRequest) -> ScreenPublic:
+def pair_screen(
+    body: ScreenPairRequest,
+    user: Annotated[dict, Depends(get_current_user)],
+) -> ScreenPublic:
     """Admin enters pairing code displayed on the TV to authorize the screen."""
     norm = _normalize_code(body.pairing_code)
     now = time.time()
@@ -156,15 +189,25 @@ def pair_screen(body: ScreenPairRequest) -> ScreenPublic:
     screen_token = secrets.token_urlsafe(32)
     name = body.name.strip() if body.name.strip() else "Màn hình TV"
     location = body.location.strip() if body.location else None
+    user_id = user.get("id")
 
     db.execute(
         """UPDATE screens
-           SET screen_token = %s, name = %s, location = %s, status = 'paired', last_seen = %s
+           SET screen_token = %s, name = %s, location = %s, status = 'paired', last_seen = %s, user_id = %s
            WHERE id = %s""",
-        (screen_token, name, location, now, row["id"]),
+        (screen_token, name, location, now, user_id, row["id"]),
     )
 
-    updated = db.query_one("SELECT * FROM screens WHERE id = %s", (row["id"],))
+    updated = db.query_one(
+        """SELECT s.*, p.name AS playlist_name,
+                  COALESCE(u.full_name, u.username, 'Quản trị viên') AS account_name,
+                  u.username AS account_username
+           FROM screens s
+           LEFT JOIN playlists p ON s.playlist_id = p.id
+           LEFT JOIN users u ON s.user_id = u.id
+           WHERE s.id = %s""",
+        (row["id"],),
+    )
     return ScreenPublic(
         id=updated["id"],
         name=updated["name"],
@@ -173,6 +216,11 @@ def pair_screen(body: ScreenPairRequest) -> ScreenPublic:
         pairing_code=updated["pairing_code"],
         last_seen=updated["last_seen"],
         created_at=updated["created_at"],
+        playlist_id=updated.get("playlist_id"),
+        playlist_name=updated.get("playlist_name"),
+        user_id=updated.get("user_id"),
+        account_name=updated.get("account_name"),
+        account_username=updated.get("account_username"),
     )
 
 

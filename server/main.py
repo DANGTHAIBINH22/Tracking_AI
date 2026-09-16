@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from server import db
-from server.routes import ads, analytics, auth, capture, ingest, live_ws, player, playlists, screens
+from server.routes import ads, analytics, auth, capture, ingest, live_ws, player, playlists, screens, sessions
 from server.settings import MEDIA_DIR, SETTINGS
 from server.state import ENGINE, PLAYER
 
@@ -62,6 +62,7 @@ app.include_router(capture.router)
 app.include_router(analytics.router)
 app.include_router(live_ws.router)
 app.include_router(ingest.router)
+app.include_router(sessions.router)
 
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/media", StaticFiles(directory=MEDIA_DIR), name="media")

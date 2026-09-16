@@ -12,21 +12,20 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   IconClock,
   IconClose,
-  IconExternal,
+  IconEdit,
   IconGrid,
   IconImage,
   IconList,
   IconMedia,
-  IconPlaylist,
   IconPlus,
   IconSearch,
   IconSparkles,
   IconTrash,
-  IconTV,
   IconUpload,
   IconVideo,
 } from "@/components/icons/Icons";
 import { UploadMediaModal } from "@/components/UploadMediaModal";
+import { EditMediaModal } from "@/components/EditMediaModal";
 import { CustomSelect } from "@/components/CustomSelect";
 import { AGE_OPTIONS, CATEGORY_OPTIONS, CROWD_OPTIONS, GENDER_OPTIONS, WEATHER_OPTIONS, labelFor } from "@/lib/taxonomy";
 
@@ -147,6 +146,9 @@ export default function MediaLibraryPage() {
 
   // Upload Modal
   const [showUploadModal, setShowUploadModal] = useState(false);
+
+  // Edit Media Modal
+  const [editingMedia, setEditingMedia] = useState<Creative | null>(null);
 
   // Add to Playlist Modal
   const [targetCreative, setTargetCreative] = useState<Creative | null>(null);
@@ -303,23 +305,12 @@ export default function MediaLibraryPage() {
             </button>
 
             <Link
-              href="/playlists"
+              href="/playlists/new"
               className="inline-flex items-center gap-2 rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-2.5 text-xs font-bold text-emerald-800 transition hover:bg-emerald-100 shadow-2xs"
             >
-              <IconPlaylist className="h-4 w-4" />
-              <span>Quản lý Playlist</span>
+              <IconPlus className="h-4 w-4" />
+              <span>Tạo Playlist</span>
             </Link>
-
-            <a
-              href="/homescreen"
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-3.5 py-2.5 text-xs font-medium text-slate-700 transition hover:bg-slate-50 shadow-2xs"
-            >
-              <IconTV className="h-4 w-4 text-slate-500" />
-              <span>Homescreen Display</span>
-              <IconExternal className="h-3.5 w-3.5 text-slate-400" />
-            </a>
           </div>
         </div>
       </section>
@@ -355,6 +346,18 @@ export default function MediaLibraryPage() {
         onUploadSuccess={(count) => {
           setInfo(`Đã tải lên thành công ${count} tệp vào Thư viện Media!`);
           refresh();
+          setTimeout(() => setInfo(null), 4000);
+        }}
+      />
+
+      {/* Edit Media Modal */}
+      <EditMediaModal
+        isOpen={Boolean(editingMedia)}
+        media={editingMedia}
+        onClose={() => setEditingMedia(null)}
+        onSaveSuccess={async () => {
+          await refresh();
+          setInfo("Đã lưu các thuộc tính media thành công!");
           setTimeout(() => setInfo(null), 4000);
         }}
       />
@@ -569,14 +572,24 @@ export default function MediaLibraryPage() {
               </div>
 
               {/* Action Footer */}
-              <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between gap-2 text-xs">
+              <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between gap-1.5 text-xs">
+                <button
+                  type="button"
+                  onClick={() => setEditingMedia(item)}
+                  className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 hover:border-slate-300 transition shadow-2xs cursor-pointer"
+                  title="Chỉnh sửa toàn bộ thuộc tính media"
+                >
+                  <IconEdit className="h-3.5 w-3.5 text-slate-500" />
+                  <span>Sửa</span>
+                </button>
+
                 <button
                   type="button"
                   onClick={() => setTargetCreative(item)}
-                  className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl border border-emerald-300 bg-emerald-50 px-3 py-1.5 text-xs font-bold text-emerald-800 hover:bg-emerald-100 transition shadow-2xs"
+                  className="flex-1 inline-flex items-center justify-center gap-1 rounded-xl border border-emerald-300 bg-emerald-50 px-2.5 py-1.5 text-xs font-bold text-emerald-800 hover:bg-emerald-100 transition shadow-2xs cursor-pointer"
                 >
                   <IconPlus className="h-3.5 w-3.5" />
-                  <span>Thêm vào Playlist...</span>
+                  <span>Playlist</span>
                 </button>
 
                 <button
@@ -591,7 +604,7 @@ export default function MediaLibraryPage() {
                       act(() => api.deleteAd(item.id));
                     }
                   }}
-                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100 transition"
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100 transition cursor-pointer"
                   title="Xoá tệp vĩnh viễn"
                 >
                   <IconTrash className="h-3.5 w-3.5" />
@@ -631,19 +644,23 @@ export default function MediaLibraryPage() {
                   <tr key={item.id} className="hover:bg-slate-50/70 transition">
                     {/* Thumbnail */}
                     <td className="py-2.5 px-4">
-                      <div className="relative aspect-video w-24 overflow-hidden rounded-lg border border-slate-200 bg-slate-950">
+                      <div
+                        onClick={() => setEditingMedia(item)}
+                        className="relative aspect-video w-24 overflow-hidden rounded-lg border border-slate-200 bg-slate-950 cursor-pointer hover:border-emerald-500 transition group/thumb"
+                        title="Bấm để chỉnh sửa thuộc tính media"
+                      >
                         {item.kind === "image" ? (
                           // eslint-disable-next-line @next/next/no-img-element
                           <img
                             src={mediaUrl(item.url)}
                             alt={item.name}
-                            className="h-full w-full object-contain"
+                            className="h-full w-full object-contain group-hover/thumb:scale-105 transition duration-150"
                           />
                         ) : (
                           <video
                             src={mediaUrl(item.url)}
                             muted
-                            className="h-full w-full object-contain"
+                            className="h-full w-full object-contain group-hover/thumb:scale-105 transition duration-150"
                           />
                         )}
                       </div>
@@ -657,7 +674,7 @@ export default function MediaLibraryPage() {
                           e.target.value !== item.name &&
                           act(() => api.updateAd(item.id, { name: e.target.value }))
                         }
-                        title="Bấm để sửa tên"
+                        title="Bấm để sửa nhanh tên"
                         className="w-full font-bold text-slate-900 hover:border-slate-300 focus:border-emerald-500 focus:bg-white rounded px-1 py-0.5 border border-transparent bg-transparent outline-none truncate"
                       />
                       <p className="text-[10px] text-slate-400 truncate px-1">{item.filename}</p>
@@ -687,30 +704,45 @@ export default function MediaLibraryPage() {
                     </td>
 
                     {/* Duration */}
-                    <td className="py-2.5 px-3 text-center font-mono font-medium text-slate-700 tabular">
-                      {item.duration}s
+                    <td className="py-2.5 px-3 text-center">
+                      <button
+                        type="button"
+                        onClick={() => setEditingMedia(item)}
+                        className="inline-flex items-center gap-1 rounded-lg px-2 py-1 font-mono font-medium text-slate-700 hover:bg-slate-100 hover:text-emerald-700 transition cursor-pointer text-xs"
+                        title="Bấm để sửa thời lượng phát"
+                      >
+                        <span>{item.duration}s</span>
+                      </button>
                     </td>
 
                     {/* Category */}
                     <td className="py-2.5 px-3">
-                      <CustomSelect
-                        size="sm"
+                      <select
                         value={item.category || "Chung"}
-                        onChange={(val) => act(() => api.updateAd(item.id, { category: val }))}
-                        options={CATEGORY_OPTIONS}
-                        buttonClassName="bg-slate-50 border-slate-200 text-slate-700"
-                      />
+                        onChange={(e) => act(() => api.updateAd(item.id, { category: e.target.value }))}
+                        className="w-full rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-medium text-slate-700 outline-none hover:bg-white hover:border-slate-300 focus:border-emerald-500 focus:bg-white transition cursor-pointer shadow-2xs"
+                      >
+                        {CATEGORY_OPTIONS.map((cat) => (
+                          <option key={cat} value={cat}>
+                            {cat}
+                          </option>
+                        ))}
+                      </select>
                     </td>
 
                     {/* Target Age */}
                     <td className="py-2.5 px-3">
-                      <CustomSelect
-                        size="sm"
+                      <select
                         value={item.target_age_group || "all"}
-                        onChange={(val) => act(() => api.updateAd(item.id, { target_age_group: val }))}
-                        options={AGE_OPTIONS}
-                        buttonClassName="bg-indigo-50/70 border-indigo-200 text-indigo-800"
-                      />
+                        onChange={(e) => act(() => api.updateAd(item.id, { target_age_group: e.target.value }))}
+                        className="w-full rounded-xl border border-indigo-200 bg-indigo-50/70 px-2.5 py-1.5 text-xs font-medium text-indigo-800 outline-none hover:bg-white hover:border-indigo-300 focus:border-indigo-500 focus:bg-white transition cursor-pointer shadow-2xs"
+                      >
+                        {AGE_OPTIONS.map((opt) => (
+                          <option key={opt.value} value={opt.value}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
                     </td>
 
                     {/* AI Buttons */}
@@ -721,7 +753,7 @@ export default function MediaLibraryPage() {
                           onClick={() => handleAutoSuggest(item)}
                           disabled={busy}
                           title="Tự động đề xuất theo tên"
-                          className="rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] font-semibold text-amber-800 hover:bg-amber-100"
+                          className="rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] font-semibold text-amber-800 hover:bg-amber-100 cursor-pointer"
                         >
                           Gợi ý
                         </button>
@@ -730,7 +762,7 @@ export default function MediaLibraryPage() {
                           onClick={() => handleAnalyze(item)}
                           disabled={analyzing !== null}
                           title="Phân tích nội dung media"
-                          className="rounded-lg border border-violet-200 bg-violet-50 px-2 py-1 text-[10px] font-semibold text-violet-800 hover:bg-violet-100 disabled:opacity-50"
+                          className="rounded-lg border border-violet-200 bg-violet-50 px-2 py-1 text-[10px] font-semibold text-violet-800 hover:bg-violet-100 disabled:opacity-50 cursor-pointer"
                         >
                           {analyzing === item.id ? "..." : "Quét AI"}
                         </button>
@@ -742,8 +774,18 @@ export default function MediaLibraryPage() {
                       <div className="flex items-center justify-end gap-1.5">
                         <button
                           type="button"
+                          onClick={() => setEditingMedia(item)}
+                          className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50 hover:border-slate-300 transition shadow-2xs cursor-pointer"
+                          title="Chỉnh sửa toàn bộ thuộc tính media"
+                        >
+                          <IconEdit className="h-3.5 w-3.5 text-slate-500" />
+                          <span>Sửa</span>
+                        </button>
+
+                        <button
+                          type="button"
                           onClick={() => setTargetCreative(item)}
-                          className="inline-flex items-center gap-1 rounded-lg border border-emerald-300 bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-800 hover:bg-emerald-100 transition shadow-2xs"
+                          className="inline-flex items-center gap-1 rounded-lg border border-emerald-300 bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-800 hover:bg-emerald-100 transition shadow-2xs cursor-pointer"
                         >
                           <IconPlus className="h-3.5 w-3.5" />
                           <span>Playlist</span>
@@ -761,7 +803,7 @@ export default function MediaLibraryPage() {
                               act(() => api.deleteAd(item.id));
                             }
                           }}
-                          className="flex h-7 w-7 items-center justify-center rounded-lg border border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100 transition"
+                          className="flex h-7 w-7 items-center justify-center rounded-lg border border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100 transition cursor-pointer"
                           title="Xoá tệp vĩnh viễn"
                         >
                           <IconTrash className="h-3.5 w-3.5" />

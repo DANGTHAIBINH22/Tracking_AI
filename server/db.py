@@ -120,6 +120,27 @@ CREATE TABLE IF NOT EXISTS app_state (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS tracking_sessions (
+    id                SERIAL PRIMARY KEY,
+    session_code      TEXT UNIQUE NOT NULL,
+    device_id         TEXT NOT NULL DEFAULT 'host',
+    screen_id         INTEGER REFERENCES screens(id) ON DELETE SET NULL,
+    source            TEXT NOT NULL DEFAULT '0',
+    started_at        DOUBLE PRECISION NOT NULL,
+    ended_at          DOUBLE PRECISION,
+    status            TEXT NOT NULL DEFAULT 'active',
+    total_footfall    INTEGER NOT NULL DEFAULT 0,
+    total_impressions INTEGER NOT NULL DEFAULT 0,
+    attention_rate    DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    avg_dwell_time    DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+    peak_people       INTEGER NOT NULL DEFAULT 0,
+    notes             TEXT NOT NULL DEFAULT '',
+    demographics_json TEXT NOT NULL DEFAULT '{}',
+    tracks_json       TEXT NOT NULL DEFAULT '[]'
+);
+CREATE INDEX IF NOT EXISTS idx_sessions_device ON tracking_sessions(device_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_started ON tracking_sessions(started_at DESC);
 """
 
 _pool: ConnectionPool | None = None
@@ -160,6 +181,9 @@ def init_db() -> None:
             ALTER TABLE playlists ADD COLUMN IF NOT EXISTS fit_screen BOOLEAN NOT NULL DEFAULT FALSE;
             ALTER TABLE playlists ADD COLUMN IF NOT EXISTS publish_status TEXT NOT NULL DEFAULT 'unpublish';
 
+            ALTER TABLE screens ADD COLUMN IF NOT EXISTS playlist_id INTEGER REFERENCES playlists(id) ON DELETE SET NULL;
+            ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS tracks_json TEXT DEFAULT '[]';
+
             -- Rows written before server/audience.py existed carry the CV
             -- pipeline's spelling of the two outer age brackets. Re-spell them
             -- so a report aggregates one bucket per bracket instead of two, and
@@ -182,9 +206,9 @@ def init_db() -> None:
             )
             print("[Database] Đã tạo tài khoản Admin mặc định: 'admin' (mật khẩu: 'admin123')")
 
-        # Ensure default playlist exists and is seeded from existing enabled creatives
-        pl_row = conn.execute("SELECT id FROM playlists WHERE is_active = TRUE LIMIT 1").fetchone()
-        if not pl_row:
+        # Ensure default playlist exists only on first-ever database setup
+        seeded = conn.execute("SELECT value FROM app_state WHERE key = 'seeded_default_playlist'").fetchone()
+        if not seeded:
             first_pl = conn.execute("SELECT id FROM playlists ORDER BY id ASC LIMIT 1").fetchone()
             if not first_pl:
                 new_pl = conn.execute(
@@ -193,7 +217,6 @@ def init_db() -> None:
                     ("Playlist Homescreen Mặc Định", "Danh sách phát quảng cáo chiếu lên màn hình Homescreen", time.time()),
                 ).fetchone()
                 pl_id = new_pl["id"]
-                # Populate with any existing creatives
                 existing_creatives = conn.execute(
                     "SELECT id, position, duration FROM creatives WHERE enabled = TRUE ORDER BY position ASC, id ASC"
                 ).fetchall()
@@ -204,8 +227,10 @@ def init_db() -> None:
                         (pl_id, c["id"], idx, c["duration"]),
                     )
                 print(f"[Database] Đã khởi tạo Playlist mặc định (id={pl_id}) với {len(existing_creatives)} media.")
-            else:
-                conn.execute("UPDATE playlists SET is_active = TRUE WHERE id = %s", (first_pl["id"],))
+            conn.execute(
+                "INSERT INTO app_state (key, value) VALUES ('seeded_default_playlist', '1') "
+                "ON CONFLICT (key) DO NOTHING"
+            )
 
 
 def close_db() -> None:

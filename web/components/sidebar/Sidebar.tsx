@@ -12,9 +12,16 @@ import { IconClose } from "@/components/icons/Icons";
 interface SidebarProps {
   mobileOpen: boolean;
   onMobileClose: () => void;
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
 }
 
-export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
+export function Sidebar({
+  mobileOpen,
+  onMobileClose,
+  collapsed = false,
+  onToggleCollapse,
+}: SidebarProps) {
   const pathname = usePathname();
   const [showScreenModal, setShowScreenModal] = useState(false);
 
@@ -26,10 +33,29 @@ export function Sidebar({ mobileOpen, onMobileClose }: SidebarProps) {
   return (
     <>
       {/* ================= DESKTOP SIDEBAR ================= */}
-      <aside className="hidden lg:flex w-64 flex-col border-r border-slate-200/80 bg-white min-h-screen shrink-0 sticky top-0 h-screen z-30 shadow-2xs">
-        {/* Brand Header */}
-        <div className="border-b border-slate-100 px-3 py-3">
-          <SidebarBrand />
+      <aside
+        className={`hidden ${
+          collapsed ? "lg:hidden" : "lg:flex"
+        } w-64 flex-col border-r border-slate-200/80 bg-white min-h-screen shrink-0 sticky top-0 h-screen z-30 shadow-2xs transition-all duration-300`}
+      >
+        {/* Brand Header with Hide Button */}
+        <div className="flex items-center justify-between border-b border-slate-100 px-2.5 py-3">
+          <div className="flex-1 min-w-0">
+            <SidebarBrand />
+          </div>
+
+          {onToggleCollapse && (
+            <button
+              type="button"
+              onClick={onToggleCollapse}
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition"
+              title="Ẩn thanh điều hướng (Sidebar)"
+            >
+              <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 19l-7-7 7-7m8 14l-7-7 7-7" />
+              </svg>
+            </button>
+          )}
         </div>
 
         {/* Tracking Action Button */}

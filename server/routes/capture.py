@@ -19,6 +19,9 @@ class CaptureStart(BaseModel):
     # "0" = default webcam; "browser" waits for a screen to push frames in over
     # /ws/ingest; anything else is a path/URL replayed as if it were live.
     source: str | None = None
+    device_id: str | None = None
+    screen_id: int | None = None
+    notes: str = ""
 
 
 @router.get("/config")
@@ -44,11 +47,15 @@ def state() -> dict:
 @router.post("/start")
 def start(body: CaptureStart | None = None) -> dict:
     source = (body.source if body else None) or SETTINGS.default_source
+    device_id = (body.device_id if body else None) or "host"
+    screen_id = body.screen_id if body else None
+    notes = (body.notes if body else "") or ""
+
     if ENGINE.running:
         snap = ENGINE.snapshot()
         if snap.get("source") != source:
             ENGINE.stop()
-    ENGINE.start(source)
+    ENGINE.start(source=source, device_id=device_id, screen_id=screen_id, notes=notes)
 
     if is_browser_source(source):
         # There is nothing to wait for: frames only start once a screen opens

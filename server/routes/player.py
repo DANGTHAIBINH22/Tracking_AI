@@ -32,7 +32,7 @@ def now_playing() -> NowPlaying:
 @router.post("/start", response_model=NowPlaying)
 def start() -> NowPlaying:
     if not PLAYER.playlist():
-        raise HTTPException(400, "Playlist trống — hãy tải lên ít nhất một quảng cáo đang bật.")
+        raise HTTPException(400, "Không có playlist nào đang kích hoạt hoặc playlist đang trống.")
     PLAYER.start()
     return _now_playing()
 

@@ -29,11 +29,16 @@ from configs import CFG
 from pipeline import Pipeline, PersonMeta
 from preprocess import preprocess
 from server import db
-from server.audience import normalize_age_group
+from server.audience import AGE_GROUPS, normalize_age_group
 from server.player import PlaylistPlayer
 from server.settings import SETTINGS
 from server.sources import BROWSER_SOURCE, BrowserSource, LocalCameraSource, is_browser_source
 from viz import draw_person, draw_fps
+
+# How many per-person rows one session may carry in `tracks_json`. A busy
+# hour is a few hundred; the cap only stops a runaway source turning one
+# TEXT column into megabytes.
+_SESSION_TRACKS_CAP = 2000
 
 
 @dataclass
@@ -91,9 +96,29 @@ class AnalyticsEngine:
         self._fps = 0.0
         self._frame_index = 0
 
+        # Session tracking per device
+        self._current_session_id: int | None = None
+        self._current_session_code: str | None = None
+        self._session_device_id: str = "host"
+        self._session_screen_id: int | None = None
+        self._session_unique_tracks: set[int] = set()
+        self._session_attentive_tracks: set[int] = set()
+        self._session_peak_people: int = 0
+        # track_id -> one row per PERSON seen in this session. The single source
+        # of truth for every session demographic: gender, age and dwell are all
+        # derived from here, so nothing is counted once per frame.
+        self._session_tracks: dict[int, dict] = {}
+        self._session_last_update_time: float = 0.0
+
     # ---------- lifecycle ----------
 
-    def start(self, source: str | None = None) -> None:
+    def start(
+        self,
+        source: str | None = None,
+        device_id: str | None = None,
+        screen_id: int | None = None,
+        notes: str = "",
+    ) -> None:
         with self._lock:
             if self._running:
                 return
@@ -101,6 +126,33 @@ class AnalyticsEngine:
             self._error = None
             self._running = True
             self._stop.clear()
+
+            # Initialize session parameters
+            self._session_device_id = str(device_id) if device_id is not None else ("host" if not is_browser_source(self._source) else "browser")
+            self._session_screen_id = screen_id
+            self._session_unique_tracks.clear()
+            self._session_attentive_tracks.clear()
+            self._session_tracks.clear()
+            self._session_peak_people = 0
+
+            # Create session in database
+            now = time.time()
+            import datetime, random
+            date_prefix = datetime.datetime.fromtimestamp(now).strftime("%Y%m%d-%H%M%S")
+            rand_suffix = random.randint(100, 999)
+            self._current_session_code = f"SES-{date_prefix}-{rand_suffix}"
+            try:
+                row = db.query_one(
+                    """INSERT INTO tracking_sessions
+                       (session_code, device_id, screen_id, source, started_at, status, notes)
+                       VALUES (%s, %s, %s, %s, %s, 'active', %s) RETURNING id""",
+                    (self._current_session_code, self._session_device_id, self._session_screen_id, self._source, now, notes),
+                )
+                self._current_session_id = row["id"] if row else None
+            except Exception as e:
+                print(f"[Tracking Session] Lỗi tạo session trong DB: {e}")
+                self._current_session_id = None
+
             self._thread = threading.Thread(target=self._loop, daemon=True, name="analytics")
             self._thread.start()
 
@@ -113,7 +165,98 @@ class AnalyticsEngine:
         thread = self._thread
         if thread is not None:
             thread.join(timeout=5.0)
-        self._flush_all(time.time())
+        now = time.time()
+        self._flush_all(now)
+        self._finalize_session(now)
+
+    def _session_digest(self) -> tuple[dict, list[dict]]:
+        """Roll the per-track ledger up into the numbers a session report needs.
+
+        Everything here is counted per `track_id`, never per frame: someone who
+        stands in front of the camera for 600 frames is ONE man in his thirties,
+        not 600 of them. Counting frames instead is what made `demographics_json`
+        and `avg_dwell_time` scale with frame rate rather than with people.
+        """
+        tracks = sorted(self._session_tracks.values(), key=lambda t: t["first_seen"])
+
+        genders = {"Nam": 0, "Nữ": 0, "unknown": 0}
+        ages = {group: 0 for group in AGE_GROUPS}
+        ages["unknown"] = 0
+        age_values: list[float] = []
+        dwell_total = 0.0
+        presence_total = 0.0
+
+        for t in tracks:
+            gender = t["gender"] or "unknown"
+            group = t["age_group"] or "unknown"
+            genders[gender] = genders.get(gender, 0) + 1
+            ages[group] = ages.get(group, 0) + 1
+            if t["age"] is not None:
+                age_values.append(float(t["age"]))
+            dwell_total += float(t["dwell_seconds"])
+            presence_total += float(t["presence_seconds"])
+
+        n = max(1, len(tracks))
+        demographics = {
+            "genders": genders,
+            "ages": ages,
+            "unique_tracks": len(tracks),
+            "attentive_tracks": len(self._session_attentive_tracks),
+            "avg_age": round(sum(age_values) / len(age_values), 1) if age_values else None,
+            "avg_presence_seconds": round(presence_total / n, 2),
+            "total_dwell_seconds": round(dwell_total, 2),
+            # The API reads this to tell a per-person row apart from a legacy
+            # per-frame one, instead of guessing from the magnitudes.
+            "counted_per": "track",
+        }
+        return demographics, tracks
+
+    def _update_session(self, now: float, completed: bool = False) -> None:
+        if not self._current_session_id:
+            return
+        footfall = len(self._session_unique_tracks)
+        impressions = len(self._session_attentive_tracks)
+        rate = round((impressions / max(1, footfall)) * 100.0, 1)
+        import json
+
+        demographics, tracks = self._session_digest()
+        avg_dwell = round(
+            sum(float(t["dwell_seconds"]) for t in tracks) / max(1, len(tracks)), 2
+        )
+        status = "completed" if completed else "active"
+        try:
+            db.execute(
+                """UPDATE tracking_sessions
+                   SET ended_at = %s,
+                       status = %s,
+                       total_footfall = %s,
+                       total_impressions = %s,
+                       attention_rate = %s,
+                       avg_dwell_time = %s,
+                       peak_people = %s,
+                       demographics_json = %s,
+                       tracks_json = %s
+                   WHERE id = %s""",
+                (
+                    now,
+                    status,
+                    footfall,
+                    impressions,
+                    rate,
+                    avg_dwell,
+                    self._session_peak_people,
+                    json.dumps(demographics, ensure_ascii=False),
+                    json.dumps(tracks[:_SESSION_TRACKS_CAP], ensure_ascii=False),
+                    self._current_session_id,
+                ),
+            )
+        except Exception as e:
+            print(f"[Tracking Session] Lỗi cập nhật session: {e}")
+
+    def _finalize_session(self, now: float) -> None:
+        if self._current_session_id:
+            self._update_session(now, completed=True)
+            self._current_session_id = None
 
     @property
     def running(self) -> bool:
@@ -386,6 +529,57 @@ class AnalyticsEngine:
         for track_id in [t for t in self._states if t not in live_ids]:
             state = self._states.pop(track_id)
             self._flush(state, now)
+
+        # Update the session ledger: one row per person, updated in place while
+        # they are in frame. Age and gender are overwritten rather than tallied —
+        # the pipeline refines its estimate for a track over time, so the last
+        # reading is the best one, and tallying would count the person per frame.
+        for m in metas:
+            self._session_unique_tracks.add(m.track_id)
+            attentive = bool(getattr(m, "attention", 0))
+            if attentive:
+                self._session_attentive_tracks.add(m.track_id)
+
+            entry = self._session_tracks.get(m.track_id)
+            if entry is None:
+                entry = {
+                    "track_id": int(m.track_id),
+                    "first_seen": now,
+                    "last_seen": now,
+                    "presence_seconds": 0.0,
+                    "dwell_seconds": 0.0,
+                    "frames": 0,
+                    "attentive_frames": 0,
+                    "gender": None,
+                    "age": None,
+                    "age_group": None,
+                }
+                self._session_tracks[m.track_id] = entry
+
+            entry["last_seen"] = now
+            entry["presence_seconds"] = round(max(0.0, now - entry["first_seen"]), 2)
+            entry["frames"] += 1
+            if attentive:
+                entry["attentive_frames"] += 1
+            # Pipeline dwell is already cumulative for the life of the track, so
+            # the latest reading is the total — adding it up would square it.
+            entry["dwell_seconds"] = round(
+                max(entry["dwell_seconds"], float(getattr(m, "dwell_time", 0.0))), 2
+            )
+            if m.gender:
+                entry["gender"] = "Nam" if m.gender.lower() in ("nam", "male", "m") else "Nữ"
+            if m.age is not None:
+                entry["age"] = round(float(m.age), 1)
+            if m.age_group:
+                entry["age_group"] = normalize_age_group(m.age_group) or m.age_group
+
+        if len(metas) > self._session_peak_people:
+            self._session_peak_people = len(metas)
+
+        # Periodic update to session in DB every 5 seconds
+        if self._current_session_id and (now - self._session_last_update_time > 5.0):
+            self._session_last_update_time = now
+            self._update_session(now, completed=False)
 
     def _flush(self, state: _TrackState, now: float) -> None:
         """Persist one (airing, track) measurement, if it clears the noise floor."""

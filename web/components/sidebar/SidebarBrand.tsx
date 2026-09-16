@@ -7,7 +7,7 @@ export function SidebarBrand() {
   return (
     <Link
       href="/"
-      className="group flex items-center gap-3 px-3 py-2 transition hover:opacity-95"
+      className="group flex items-center gap-2.5 px-1.5 py-1 transition hover:opacity-95"
     >
       <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-500 to-teal-700 text-emerald-600 shadow-md shadow-emerald-700/20 ring-1 ring-emerald-400/30 transition duration-200 group-hover:scale-105">
         <IconBrand className="h-6 w-6 text-white" />

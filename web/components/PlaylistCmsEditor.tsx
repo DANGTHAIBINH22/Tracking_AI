@@ -9,6 +9,7 @@ import {
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import SelectScreenModal from "@/components/SelectScreenModal";
 
 export type SlideItem = {
   id: string; // local unique id for slide
@@ -57,6 +58,8 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
+  const [fullPlaylist, setFullPlaylist] = useState<PlaylistPublic | null>(null);
+  const [showScreenModal, setShowScreenModal] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -67,6 +70,7 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
       api
         .getPlaylist(playlistId)
         .then((data) => {
+          setFullPlaylist(data);
           setPlaylistName(data.name);
           setPlaylistKind((data.kind as "slideshow" | "videowall") || "slideshow");
           setAspectRatio(data.aspect_ratio || "FullHD Nghiêng");
@@ -306,41 +310,52 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
   const isPortrait = aspectRatio.includes("Nghiêng") || aspectRatio.includes("1080x1920");
 
   return (
-    <div className="flex h-screen flex-col bg-[#111215] text-zinc-200 overflow-hidden select-none">
+    <div className="flex h-screen flex-col bg-[#f8fafc] text-slate-800 overflow-hidden select-none">
       {/* ==================== 1. TOP BAR ==================== */}
-      <header className="flex h-13 shrink-0 items-center justify-between border-b border-[#22242a] bg-[#14161a] px-4">
+      <header className="flex h-13 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4 shadow-2xs">
         {/* Left: Breadcrumbs */}
         <div className="flex items-center gap-3 text-xs">
-          <button
-            type="button"
-            className="flex h-7 w-7 items-center justify-center rounded-md text-zinc-400 hover:bg-[#202228] hover:text-white"
-            title="Menu"
+          <Link
+            href="/playlists"
+            className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition"
+            title="Quay lại Playlist"
           >
             <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h7" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
             </svg>
-          </button>
-          <span className="text-zinc-700">|</span>
+          </Link>
+          <span className="text-slate-300">|</span>
           <div className="flex items-center gap-1.5 font-medium">
-            <Link href="/" className="text-zinc-400 hover:text-white transition">
+            <Link href="/" className="text-slate-400 hover:text-slate-700 transition">
               Trang chủ
             </Link>
-            <span className="text-zinc-600">›</span>
-            <Link href="/playlists" className="text-zinc-400 hover:text-white transition">
+            <span className="text-slate-300">›</span>
+            <Link href="/playlists" className="text-slate-400 hover:text-slate-700 transition">
               Playlist
             </Link>
-            <span className="text-zinc-600">›</span>
-            <span className="text-white font-semibold">
+            <span className="text-slate-300">›</span>
+            <span className="text-slate-900 font-semibold">
               {mode === "create" ? "Tạo mới" : playlistName || "Chỉnh sửa"}
             </span>
           </div>
         </div>
 
         {/* Right: Actions */}
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2.5">
+          {mode === "edit" && fullPlaylist && (
+            <button
+              type="button"
+              onClick={() => setShowScreenModal(true)}
+              className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-50 border border-emerald-300 px-3.5 py-2 text-xs font-bold text-emerald-700 hover:bg-emerald-100/80 transition cursor-pointer shadow-2xs"
+              title="Chọn thiết bị của tài khoản để phát playlist này"
+            >
+              <span>📺 Phát lên thiết bị</span>
+            </button>
+          )}
+
           <Link
             href="/playlists"
-            className="px-3 py-1 text-xs font-medium text-zinc-400 hover:text-white transition"
+            className="px-3.5 py-1.5 text-xs font-semibold text-slate-600 hover:text-slate-900 transition hover:bg-slate-100 rounded-xl"
           >
             Hủy
           </Link>
@@ -349,54 +364,39 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
             type="button"
             disabled={saving}
             onClick={handleSavePlaylist}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-white px-4 py-1.5 text-xs font-bold text-zinc-900 shadow-sm transition hover:bg-zinc-200 disabled:opacity-50 active:scale-95"
+            className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white shadow-sm transition hover:bg-emerald-700 disabled:opacity-50 active:scale-95 cursor-pointer"
           >
             {saving ? "Đang lưu..." : "Lưu playlist"}
-          </button>
-
-          {/* Bell icon */}
-          <button
-            type="button"
-            className="flex h-7 w-7 items-center justify-center rounded-md text-zinc-400 hover:bg-[#202228] hover:text-white"
-          >
-            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"
-              />
-            </svg>
           </button>
         </div>
       </header>
 
       {/* ==================== 2. CONFIGURATION CONTROLS BAR ==================== */}
-      <section className="shrink-0 border-b border-[#22242a] bg-[#16171c] px-4 py-2.5">
+      <section className="shrink-0 border-b border-slate-200 bg-white px-4 py-2.5 shadow-2xs">
         <div className="flex flex-wrap items-center gap-4 text-xs">
           {/* Tên playlist */}
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-semibold text-zinc-400">Tên playlist</label>
+            <label className="text-[11px] font-semibold text-slate-500">Tên playlist</label>
             <input
               type="text"
               value={playlistName}
               onChange={(e) => setPlaylistName(e.target.value)}
               placeholder="Nhập tên playlist..."
-              className="h-8 w-56 rounded-md border border-[#2a2d35] bg-[#121316] px-2.5 text-xs text-zinc-100 placeholder-zinc-500 outline-none focus:border-zinc-400"
+              className="h-8 w-56 rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs text-slate-900 placeholder-slate-400 outline-none focus:bg-white focus:border-emerald-500 transition"
             />
           </div>
 
           {/* Loại playlist: Segmented toggle */}
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-semibold text-zinc-400">Loại playlist</label>
-            <div className="flex h-8 items-center rounded-md border border-[#2a2d35] bg-[#121316] p-0.5">
+            <label className="text-[11px] font-semibold text-slate-500">Loại playlist</label>
+            <div className="flex h-8 items-center rounded-lg border border-slate-200 bg-slate-100 p-0.5">
               <button
                 type="button"
                 onClick={() => setPlaylistKind("slideshow")}
-                className={`h-full rounded px-3 text-xs font-semibold transition ${
+                className={`h-full rounded-md px-3 text-xs font-semibold transition cursor-pointer ${
                   playlistKind === "slideshow"
-                    ? "bg-white text-zinc-900 shadow-sm"
-                    : "text-zinc-400 hover:text-zinc-200"
+                    ? "bg-white text-slate-900 shadow-xs"
+                    : "text-slate-500 hover:text-slate-900"
                 }`}
               >
                 Slideshow
@@ -404,10 +404,10 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
               <button
                 type="button"
                 onClick={() => setPlaylistKind("videowall")}
-                className={`h-full rounded px-3 text-xs font-semibold transition ${
+                className={`h-full rounded-md px-3 text-xs font-semibold transition cursor-pointer ${
                   playlistKind === "videowall"
-                    ? "bg-white text-zinc-900 shadow-sm"
-                    : "text-zinc-400 hover:text-zinc-200"
+                    ? "bg-white text-slate-900 shadow-xs"
+                    : "text-slate-500 hover:text-slate-900"
                 }`}
               >
                 Video Wall
@@ -417,11 +417,11 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
 
           {/* Tỷ lệ màn hình */}
           <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-semibold text-zinc-400">Tỷ lệ màn hình</label>
+            <label className="text-[11px] font-semibold text-slate-500">Tỷ lệ màn hình</label>
             <select
               value={aspectRatio}
               onChange={(e) => setAspectRatio(e.target.value)}
-              className="h-8 rounded-md border border-[#2a2d35] bg-[#121316] px-2.5 text-xs text-zinc-200 outline-none focus:border-zinc-400"
+              className="h-8 rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs text-slate-800 outline-none focus:bg-white focus:border-emerald-500 cursor-pointer"
             >
               <option value="FullHD Nghiêng">FullHD Nghiêng (1080x1920)</option>
               <option value="FullHD Ngang">FullHD Ngang (1920x1080)</option>
@@ -432,16 +432,16 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
 
           {/* Chế độ phát đồng bộ */}
           <div className="flex items-center gap-2 pt-4">
-            <span className="text-[11px] font-semibold text-zinc-400">Chế độ phát đồng bộ</span>
+            <span className="text-[11px] font-semibold text-slate-500">Chế độ phát đồng bộ</span>
             <button
               type="button"
               onClick={() => setSyncPlayback(!syncPlayback)}
               className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                syncPlayback ? "bg-emerald-600" : "bg-[#2d3038]"
+                syncPlayback ? "bg-emerald-600" : "bg-slate-300"
               }`}
             >
               <span
-                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
                   syncPlayback ? "translate-x-4" : "translate-x-0"
                 }`}
               />
@@ -450,16 +450,16 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
 
           {/* Vừa khung hình */}
           <div className="flex items-center gap-2 pt-4">
-            <span className="text-[11px] font-semibold text-zinc-400">Vừa khung hình</span>
+            <span className="text-[11px] font-semibold text-slate-500">Vừa khung hình</span>
             <button
               type="button"
               onClick={() => setFitScreen(!fitScreen)}
               className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                fitScreen ? "bg-emerald-600" : "bg-[#2d3038]"
+                fitScreen ? "bg-emerald-600" : "bg-slate-300"
               }`}
             >
               <span
-                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
                   fitScreen ? "translate-x-4" : "translate-x-0"
                 }`}
               />
@@ -469,55 +469,28 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
           {/* Notifications */}
           {(info || error) && (
             <div className="ml-auto flex items-center gap-2 pt-3">
-              {info && <span className="text-xs text-emerald-400">{info}</span>}
-              {error && <span className="text-xs text-rose-400">{error}</span>}
+              {info && <span className="text-xs font-semibold text-emerald-700">{info}</span>}
+              {error && <span className="text-xs font-semibold text-rose-600">{error}</span>}
             </div>
           )}
         </div>
       </section>
 
-      {/* ==================== 3. MAIN WORKSPACE (LEFT RAIL + CENTER CANVAS + RIGHT MEDIA) ==================== */}
+      {/* ==================== 3. MAIN WORKSPACE (CENTER CANVAS + RIGHT MEDIA) ==================== */}
       <div className="flex flex-1 overflow-hidden">
-        {/* 3.1 Left Icon Rail */}
-        <aside className="flex w-12 shrink-0 flex-col items-center border-r border-[#22242a] bg-[#141519] py-3 gap-4">
-          {/* Logo icon */}
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-teal-500/10 text-teal-400 border border-teal-500/30">
-            <span className="font-bold text-sm">⊞</span>
-          </div>
-
-          <div className="flex flex-col items-center gap-2 text-zinc-400 text-xs font-semibold">
-            <Link href="/ads" className="p-2 hover:text-white rounded-lg hover:bg-[#20222a]" title="Thư viện media">
-              Media
-            </Link>
-            <Link href="/" className="p-2 hover:text-white rounded-lg hover:bg-[#20222a]" title="Tổng quan">
-              Stats
-            </Link>
-            <Link href="/playlists" className="p-2 text-emerald-400 rounded-lg bg-[#20222a]" title="Quản lý Playlist">
-              Playlists
-            </Link>
-            <Link href="/admin" className="p-2 hover:text-white rounded-lg hover:bg-[#20222a]" title="Thiết bị">
-              Thiết bị
-            </Link>
-          </div>
-
-          {/* User profile bubble at bottom */}
-          <div className="mt-auto flex h-7 w-7 items-center justify-center rounded-full bg-zinc-800 text-[11px] font-bold text-zinc-300">
-            N
-          </div>
-        </aside>
 
         {/* 3.2 Center Preview Canvas */}
-        <main className="relative flex flex-1 flex-col items-center justify-center bg-[#0d0e11] p-4 overflow-hidden">
+        <main className="relative flex flex-1 flex-col items-center justify-center bg-slate-100/90 p-4 overflow-hidden">
           {/* Top Simulator Mode Badge */}
           <div className="absolute top-4 flex items-center justify-center">
-            <span className="rounded-full bg-[#1b1d24] border border-[#2a2c36] px-3.5 py-1 text-[10px] font-bold tracking-wider text-zinc-400 uppercase">
+            <span className="rounded-full bg-white border border-slate-200/90 px-3.5 py-1 text-[10px] font-bold tracking-wider text-slate-600 uppercase shadow-2xs">
               Chế độ mô phỏng trình phát ({isPortrait ? "1080x1920PX" : "1920x1080PX"})
             </span>
           </div>
 
           {/* Canvas Box */}
           <div
-            className={`relative flex items-center justify-center overflow-hidden rounded-xl border border-[#22242c] bg-[#131418] shadow-2xl transition-all duration-200 ${
+            className={`relative flex items-center justify-center overflow-hidden rounded-2xl border border-slate-300 bg-slate-900 shadow-xl transition-all duration-200 ${
               isPortrait
                 ? "h-[72%] aspect-[9/16]"
                 : "w-[72%] max-w-4xl aspect-video"
@@ -549,19 +522,19 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
                 )}
 
                 {/* Floating slide info tag */}
-                <div className="absolute bottom-3 left-3 rounded-md bg-black/70 px-2 py-1 text-[10px] font-semibold text-white backdrop-blur-xs">
+                <div className="absolute bottom-3 left-3 rounded-lg bg-black/70 px-2.5 py-1 text-[10px] font-semibold text-white backdrop-blur-xs">
                   Trang {selectedSlideIndex + 1}: {currentSlide.creative.name} ({currentSlide.duration}s)
                 </div>
               </div>
             ) : (
-              /* Empty state matching Image 2 */
-              <div className="flex flex-col items-center justify-center text-center p-8 space-y-3">
-                <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-[#1b1d24] text-xs font-bold text-zinc-500 border border-[#292b35]">
+              /* Empty state */
+              <div className="flex flex-col items-center justify-center text-center p-8 space-y-3 bg-white/95 rounded-2xl border border-slate-200 shadow-md max-w-xs mx-4">
+                <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-100 text-xs font-bold text-slate-400 border border-slate-200">
                   Trống
                 </div>
                 <div className="space-y-1">
-                  <h3 className="text-sm font-bold text-zinc-200">Trang này chưa có nội dung</h3>
-                  <p className="text-xs text-zinc-500 max-w-xs leading-relaxed">
+                  <h3 className="text-sm font-bold text-slate-900">Trang này chưa có nội dung</h3>
+                  <p className="text-xs text-slate-500 leading-relaxed">
                     Chọn một hình ảnh hoặc video ở Thư viện Media bên phải để gán vào trang này.
                   </p>
                 </div>
@@ -571,31 +544,31 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
         </main>
 
         {/* 3.3 Right Media Library Drawer */}
-        <aside className="flex w-72 sm:w-80 shrink-0 flex-col border-l border-[#22242a] bg-[#141519]">
+        <aside className="flex w-72 sm:w-80 shrink-0 flex-col border-l border-slate-200 bg-white shadow-2xs">
           {/* Header */}
-          <div className="border-b border-[#22242a] p-3.5 space-y-1">
-            <h3 className="text-xs font-bold text-white uppercase tracking-wider">Thư Viện Media</h3>
-            <p className="text-[11px] text-zinc-500">Bấm vào media để gán cho trang đang chọn.</p>
+          <div className="border-b border-slate-100 p-3.5 space-y-1 bg-slate-50/50">
+            <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Thư Viện Media</h3>
+            <p className="text-[11px] text-slate-500">Bấm vào media để gán cho trang đang chọn.</p>
           </div>
 
           {/* Search & Filter */}
-          <div className="p-3 border-b border-[#22242a] space-y-2">
+          <div className="p-3 border-b border-slate-100 space-y-2">
             <div className="relative">
               <input
                 type="text"
                 placeholder="Tìm theo tên..."
                 value={mediaSearch}
                 onChange={(e) => setMediaSearch(e.target.value)}
-                className="h-8 w-full rounded-md border border-[#262830] bg-[#111215] px-2.5 text-xs text-zinc-200 placeholder-zinc-500 outline-none focus:border-zinc-500"
+                className="h-8 w-full rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs text-slate-900 placeholder-slate-400 outline-none focus:bg-white focus:border-emerald-500 transition"
               />
             </div>
 
-            <div className="flex items-center justify-between text-xs text-zinc-400">
-              <span className="text-[11px]">Lọc loại</span>
+            <div className="flex items-center justify-between text-xs text-slate-600">
+              <span className="text-[11px] font-medium">Lọc loại</span>
               <select
                 value={mediaFilter}
                 onChange={(e) => setMediaFilter(e.target.value as "all" | "video" | "image" | "web")}
-                className="h-7 rounded border border-[#262830] bg-[#111215] px-2 text-[11px] text-zinc-300 outline-none"
+                className="h-7 rounded-lg border border-slate-200 bg-slate-50 px-2 text-[11px] text-slate-700 outline-none focus:bg-white focus:border-emerald-500 cursor-pointer"
               >
                 <option value="all">Tất cả</option>
                 <option value="video">Chỉ Video</option>
@@ -606,7 +579,7 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
           </div>
 
           {/* Quick Action Buttons */}
-          <div className="p-3 border-b border-[#22242a] space-y-2">
+          <div className="p-3 border-b border-slate-100 space-y-2">
             <input
               ref={fileInputRef}
               type="file"
@@ -618,7 +591,7 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
               type="button"
               disabled={uploading}
               onClick={() => fileInputRef.current?.click()}
-              className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-[#2e313b] bg-[#1a1c22] py-2 text-xs font-semibold text-zinc-200 hover:bg-[#23262f] transition shadow-xs disabled:opacity-50"
+              className="flex w-full items-center justify-center gap-1.5 rounded-xl bg-emerald-600 py-2 text-xs font-bold text-white hover:bg-emerald-700 transition shadow-xs disabled:opacity-50 cursor-pointer"
             >
               <span>{uploading ? "Đang tải..." : "+ Tải ảnh/video/PDF lên"}</span>
             </button>
@@ -626,14 +599,14 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
             <button
               type="button"
               onClick={() => setShowWebUrlModal(true)}
-              className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-[#2e313b] bg-[#1a1c22] py-2 text-xs font-semibold text-zinc-200 hover:bg-[#23262f] transition shadow-xs"
+              className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 transition shadow-2xs cursor-pointer"
             >
               <span>+ Thêm nội dung Web (URL)</span>
             </button>
           </div>
 
           {/* Media Items Scrollable List */}
-          <div className="flex-1 overflow-y-auto p-2 divide-y divide-[#1e2026]">
+          <div className="flex-1 overflow-y-auto p-2 divide-y divide-slate-100">
             {filteredMedia.map((ad) => {
               const isCurrent = currentSlide?.creative?.id === ad.id;
 
@@ -641,22 +614,26 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
                 <div
                   key={ad.id}
                   onClick={() => handleAssignMedia(ad)}
-                  className={`flex items-center gap-2.5 p-2 rounded-lg cursor-pointer transition ${
+                  className={`flex items-center gap-2.5 p-2 rounded-xl cursor-pointer transition ${
                     isCurrent
-                      ? "bg-emerald-950/40 border border-emerald-500/40"
-                      : "hover:bg-[#1b1d24]"
+                      ? "bg-emerald-50 border border-emerald-300"
+                      : "hover:bg-slate-50 border border-transparent"
                   }`}
                   title="Bấm để gán vào trang đang chọn"
                 >
                   {/* Icon */}
-                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-[#101114] border border-[#282a32] text-[10px] font-bold text-zinc-400">
+                  <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border text-[10px] font-bold ${
+                    isCurrent
+                      ? "bg-emerald-100 border-emerald-300 text-emerald-800"
+                      : "bg-slate-100 border-slate-200 text-slate-600"
+                  }`}>
                     {ad.kind === "video" ? "VID" : ad.kind === "web" ? "WEB" : "IMG"}
                   </div>
 
                   {/* Title & Info */}
                   <div className="flex-1 min-w-0">
-                    <p className="text-xs font-medium text-zinc-200 truncate">{ad.name}</p>
-                    <p className="text-[10px] text-zinc-500 truncate">
+                    <p className={`text-xs font-medium truncate ${isCurrent ? "text-emerald-900 font-bold" : "text-slate-800"}`}>{ad.name}</p>
+                    <p className="text-[10px] text-slate-500 truncate">
                       {ad.kind === "video"
                         ? `Video (${ad.duration}s)`
                         : ad.kind === "web"
@@ -666,14 +643,14 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
                   </div>
 
                   {isCurrent && (
-                    <span className="text-[11px] font-bold text-emerald-400">Đã gán</span>
+                    <span className="text-[11px] font-bold text-emerald-700">Đã gán</span>
                   )}
                 </div>
               );
             })}
 
             {filteredMedia.length === 0 && (
-              <div className="py-12 text-center text-xs text-zinc-500">
+              <div className="py-12 text-center text-xs text-slate-400">
                 Chưa có media nào. Hãy bấm nút &quot;Tải ảnh/video/PDF lên&quot; ở trên!
               </div>
             )}
@@ -682,16 +659,16 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
       </div>
 
       {/* ==================== 4. BOTTOM PANEL: DANH SÁCH TRANG (SLIDES TIMELINE) ==================== */}
-      <footer className="shrink-0 border-t border-[#22242a] bg-[#14161a] p-3">
+      <footer className="shrink-0 border-t border-slate-200 bg-white p-3 shadow-xs">
         <div className="flex items-center justify-between pb-2 text-xs">
           <div className="flex items-center gap-2">
-            <span className="font-bold text-zinc-300 uppercase tracking-wider">
+            <span className="font-bold text-slate-800 uppercase tracking-wider">
               Danh Sách Trang ({slides.length})
             </span>
           </div>
 
           <div className="flex items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-[#1b1d24] px-2.5 py-0.5 text-[10px] font-bold text-emerald-400 border border-[#272a33]">
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-[10px] font-bold text-emerald-700 border border-emerald-200">
               <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
               <span>120 FPS</span>
             </span>
@@ -709,20 +686,22 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
                 onClick={() => setSelectedSlideIndex(index)}
                 className={`relative flex flex-col justify-between rounded-xl border p-2 w-36 h-36 shrink-0 cursor-pointer transition ${
                   isSelected
-                    ? "border-emerald-500 ring-2 ring-emerald-500/20 bg-[#191b22]"
-                    : "border-[#252832] bg-[#121317] hover:border-zinc-500"
+                    ? "border-emerald-500 ring-2 ring-emerald-500/20 bg-emerald-50/40"
+                    : "border-slate-200 bg-slate-50/70 hover:border-slate-300 hover:bg-slate-50"
                 }`}
               >
                 {/* Header of card: Index & Drag handle */}
-                <div className="flex items-center justify-between text-[11px] text-zinc-400">
-                  <span className="flex h-4 w-4 items-center justify-center rounded bg-[#20222a] font-bold text-[10px] text-zinc-200">
+                <div className="flex items-center justify-between text-[11px] text-slate-500">
+                  <span className={`flex h-4 w-4 items-center justify-center rounded font-bold text-[10px] ${
+                    isSelected ? "bg-emerald-600 text-white" : "bg-slate-200 text-slate-700"
+                  }`}>
                     {index + 1}
                   </span>
-                  <span className="text-zinc-600">⋮⋮</span>
+                  <span className="text-slate-400">⋮⋮</span>
                 </div>
 
                 {/* Thumbnail Preview */}
-                <div className="relative my-1 flex h-16 w-full items-center justify-center rounded-md bg-[#0a0b0e] border border-[#20222a] overflow-hidden">
+                <div className="relative my-1 flex h-16 w-full items-center justify-center rounded-lg bg-slate-900 border border-slate-200 overflow-hidden">
                   {slide.creative ? (
                     slide.creative.kind === "image" ? (
                       // eslint-disable-next-line @next/next/no-img-element
@@ -738,30 +717,30 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
                         className="h-full w-full object-cover"
                       />
                     ) : (
-                      <span className="text-xs font-bold text-zinc-400">WEB</span>
+                      <span className="text-xs font-bold text-slate-300">WEB</span>
                     )
                   ) : (
-                    <span className="text-xs font-bold text-zinc-600">IMG</span>
+                    <span className="text-xs font-bold text-slate-400">IMG</span>
                   )}
                 </div>
 
                 {/* Duration & Card Actions Toolbar */}
-                <div className="flex items-center justify-between pt-1 border-t border-[#20222a] text-[11px]">
+                <div className="flex items-center justify-between pt-1 border-t border-slate-200/80 text-[11px]">
                   {/* Duration input */}
                   <div className="flex items-center gap-1">
-                    <span className="text-zinc-500 text-[10px]">Giây:</span>
+                    <span className="text-slate-500 text-[10px]">Giây:</span>
                     <input
                       type="number"
                       min={1}
                       value={slide.duration}
                       onClick={(e) => e.stopPropagation()}
                       onChange={(e) => handleSlideDurationChange(index, Number(e.target.value))}
-                      className="w-8 rounded bg-[#1c1e26] border border-[#2b2e38] text-center font-bold text-white text-[10px] outline-none"
+                      className="w-9 rounded-md bg-white border border-slate-300 text-center font-bold text-slate-800 text-[10px] outline-none focus:border-emerald-500"
                     />
                   </div>
 
                   {/* Actions: Reorder & Delete */}
-                  <div className="flex items-center gap-1 text-zinc-400">
+                  <div className="flex items-center gap-1 text-slate-400">
                     <button
                       type="button"
                       disabled={index === 0}
@@ -769,7 +748,7 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
                         e.stopPropagation();
                         handleMoveSlide(index, -1);
                       }}
-                      className="hover:text-white disabled:opacity-20"
+                      className="hover:text-slate-800 disabled:opacity-20 cursor-pointer font-bold"
                       title="Chuyển sang trái"
                     >
                       ‹
@@ -781,7 +760,7 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
                         e.stopPropagation();
                         handleMoveSlide(index, 1);
                       }}
-                      className="hover:text-white disabled:opacity-20"
+                      className="hover:text-slate-800 disabled:opacity-20 cursor-pointer font-bold"
                       title="Chuyển sang phải"
                     >
                       ›
@@ -792,7 +771,7 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
                         e.stopPropagation();
                         handleDeleteSlide(index);
                       }}
-                      className="hover:text-rose-400 text-xs font-semibold"
+                      className="hover:text-rose-600 text-xs font-semibold text-slate-500 transition cursor-pointer"
                       title="Xoá trang"
                     >
                       Xoá
@@ -807,7 +786,7 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
           <button
             type="button"
             onClick={handleAddSlide}
-            className="flex flex-col items-center justify-center rounded-xl border-2 border-dashed border-[#282a35] bg-[#121317]/50 w-36 h-36 shrink-0 text-zinc-400 hover:border-emerald-500 hover:text-emerald-400 transition"
+            className="flex flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-slate-50/50 w-36 h-36 shrink-0 text-slate-500 hover:border-emerald-500 hover:bg-emerald-50/30 hover:text-emerald-700 transition cursor-pointer"
           >
             <span className="text-2xl font-bold mb-1">+</span>
             <span className="text-xs font-semibold">Thêm trang</span>
@@ -817,80 +796,93 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
 
       {/* ==================== MODAL: THÊM NỘI DUNG WEB (URL) ==================== */}
       {showWebUrlModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
           <form
             onSubmit={handleAddWebUrl}
-            className="w-full max-w-md rounded-xl border border-[#2b2d38] bg-[#171920] p-5 shadow-2xl space-y-4"
+            className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl space-y-4"
           >
-            <div className="flex items-center justify-between border-b border-[#262832] pb-3">
-              <h3 className="text-sm font-bold text-white flex items-center gap-2">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
                 <span>Thêm Nội Dung Web (URL)</span>
               </h3>
               <button
                 type="button"
                 onClick={() => setShowWebUrlModal(false)}
-                className="text-zinc-400 hover:text-white font-bold"
+                className="text-slate-400 hover:text-slate-600 font-bold cursor-pointer"
               >
-                Đóng
+                ✕
               </button>
             </div>
 
             <div className="space-y-3 text-xs">
               <div>
-                <label className="block font-semibold text-zinc-300 mb-1">Tên hiển thị</label>
+                <label className="block font-semibold text-slate-700 mb-1">Tên hiển thị</label>
                 <input
                   type="text"
                   placeholder="Ví dụ: Bảng giá chứng khoán, Live Dashboard..."
                   value={webTitle}
                   onChange={(e) => setWebTitle(e.target.value)}
-                  className="w-full rounded-lg border border-[#2c2f3a] bg-[#101115] px-3 py-2 text-xs text-white outline-none focus:border-emerald-500"
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 outline-none focus:bg-white focus:border-emerald-500 transition"
                   autoFocus
                   required
                 />
               </div>
 
               <div>
-                <label className="block font-semibold text-zinc-300 mb-1">Đường dẫn Website (URL)</label>
+                <label className="block font-semibold text-slate-700 mb-1">Đường dẫn Website (URL)</label>
                 <input
                   type="url"
                   placeholder="https://example.com/widget..."
                   value={webUrl}
                   onChange={(e) => setWebUrl(e.target.value)}
-                  className="w-full rounded-lg border border-[#2c2f3a] bg-[#101115] px-3 py-2 text-xs text-white outline-none focus:border-emerald-500"
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 outline-none focus:bg-white focus:border-emerald-500 transition"
                   required
                 />
               </div>
 
               <div>
-                <label className="block font-semibold text-zinc-300 mb-1">Thời lượng phát (giây)</label>
+                <label className="block font-semibold text-slate-700 mb-1">Thời lượng phát (giây)</label>
                 <input
                   type="number"
                   min={5}
                   value={webDuration}
                   onChange={(e) => setWebDuration(Number(e.target.value))}
-                  className="w-full rounded-lg border border-[#2c2f3a] bg-[#101115] px-3 py-2 text-xs text-white outline-none focus:border-emerald-500"
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 outline-none focus:bg-white focus:border-emerald-500 transition"
                 />
               </div>
             </div>
 
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-[#262832] text-xs">
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100 text-xs">
               <button
                 type="button"
                 onClick={() => setShowWebUrlModal(false)}
-                className="rounded-lg border border-[#2e313b] bg-[#1b1d24] px-3.5 py-1.5 font-medium text-zinc-300 hover:bg-[#242630]"
+                className="rounded-xl border border-slate-200 bg-white px-3.5 py-1.5 font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
               >
                 Hủy
               </button>
               <button
                 type="submit"
                 disabled={!webUrl.trim() || !webTitle.trim() || saving}
-                className="rounded-lg bg-emerald-600 px-4 py-1.5 font-bold text-white hover:bg-emerald-700 disabled:opacity-50"
+                className="rounded-xl bg-emerald-600 px-4 py-1.5 font-bold text-white hover:bg-emerald-700 disabled:opacity-50 cursor-pointer shadow-xs"
               >
                 {saving ? "Đang thêm..." : "Thêm vào Playlist"}
               </button>
             </div>
           </form>
         </div>
+      )}
+
+      {/* Screen Selection Modal */}
+      {showScreenModal && fullPlaylist && (
+        <SelectScreenModal
+          playlist={fullPlaylist}
+          onClose={() => setShowScreenModal(false)}
+          onSuccess={() => {
+            setShowScreenModal(false);
+            setInfo("Đã kích hoạt phát playlist lên các thiết bị đã chọn!");
+            setTimeout(() => setInfo(null), 3500);
+          }}
+        />
       )}
     </div>
   );

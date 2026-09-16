@@ -12,6 +12,7 @@ from server import db
 from server.audience import normalize_target_age
 from server.routes.ads import IMAGE_EXT, VIDEO_EXT, _video_duration, to_public
 from server.schemas import (
+    PlaylistActivateRequest,
     PlaylistCreate,
     PlaylistItemAdd,
     PlaylistItemOrder,
@@ -90,12 +91,21 @@ def _to_playlist_public(row: dict, load_items: bool = False) -> PlaylistPublic:
         item_count = stats.get("cnt", 0)
         total_duration = float(stats.get("total_dur", 0.0))
 
+    assigned_screens = db.query(
+        "SELECT id, name FROM screens WHERE playlist_id = %s AND status = 'paired' ORDER BY id ASC",
+        (pid,),
+    )
+    assigned_screen_ids = [s["id"] for s in assigned_screens]
+    assigned_screen_names = [s["name"] or f"Thiết bị #{s['id']}" for s in assigned_screens]
+
     is_active = bool(row.get("is_active", False))
-    if is_active:
-        publish_status = "Đang phát ở 1 thiết bị"
+    if assigned_screens:
+        if len(assigned_screens) == 1:
+            publish_status = f"Đang phát ở: {assigned_screen_names[0]}"
+        else:
+            publish_status = f"Đang phát ở {len(assigned_screens)} thiết bị"
     else:
-        status_val = row.get("publish_status")
-        publish_status = "Đang phát ở 1 thiết bị" if status_val == "published" else "Chưa publish"
+        publish_status = "Chưa chọn thiết bị phát" if not is_active else "Chưa có thiết bị kết nối"
 
     return PlaylistPublic(
         id=pid,
@@ -111,6 +121,8 @@ def _to_playlist_public(row: dict, load_items: bool = False) -> PlaylistPublic:
         item_count=item_count,
         total_duration=round(total_duration, 2),
         items=items,
+        assigned_screen_ids=assigned_screen_ids,
+        assigned_screen_names=assigned_screen_names,
     )
 
 
@@ -166,6 +178,17 @@ def update_playlist(playlist_id: int, patch: PlaylistUpdate) -> PlaylistPublic:
         sets = ", ".join(f"{k} = %s" for k in fields)
         db.execute(f"UPDATE playlists SET {sets} WHERE id = %s", (*fields.values(), playlist_id))
 
+    if "is_active" in fields:
+        from server.state import PLAYER
+        if fields["is_active"]:
+            PLAYER.skip()
+        else:
+            has_active = db.query_one("SELECT id FROM playlists WHERE is_active = TRUE LIMIT 1")
+            if not has_active:
+                PLAYER.stop()
+            else:
+                PLAYER.skip()
+
     row = db.query_one("SELECT * FROM playlists WHERE id = %s", (playlist_id,))
     return _to_playlist_public(row, load_items=True)
 
@@ -178,26 +201,82 @@ def delete_playlist(playlist_id: int) -> None:
     was_active = bool(row.get("is_active", False))
     db.execute("DELETE FROM playlists WHERE id = %s", (playlist_id,))
 
-    # If the active playlist was deleted, activate another if one exists
+    from server.state import PLAYER
     if was_active:
+        # If the active playlist was deleted, activate another if one exists
         other = db.query_one("SELECT id FROM playlists ORDER BY id ASC LIMIT 1")
         if other:
             db.execute("UPDATE playlists SET is_active = TRUE WHERE id = %s", (other["id"],))
+            PLAYER.skip()
+        else:
+            PLAYER.stop()
+    else:
+        # Check if currently airing creative belonged to this deleted playlist
+        snap = PLAYER.snapshot()
+        cur = snap.get("creative")
+        if cur and cur.get("playlist_id") == playlist_id:
+            PLAYER.skip()
 
 
 @router.post("/{playlist_id}/activate", response_model=PlaylistPublic)
-def activate_playlist(playlist_id: int) -> PlaylistPublic:
-    """Set this playlist as the active one broadcasting to Homescreen."""
+def activate_playlist(playlist_id: int, body: PlaylistActivateRequest | None = None) -> PlaylistPublic:
+    """Set this playlist as the active one broadcasting to Homescreen & selected screens."""
     row = db.query_one("SELECT * FROM playlists WHERE id = %s", (playlist_id,))
     if not row:
         raise HTTPException(404, "Không tìm thấy playlist")
-    
+
+    # Set as active playlist
     db.execute("UPDATE playlists SET is_active = FALSE")
     db.execute("UPDATE playlists SET is_active = TRUE WHERE id = %s", (playlist_id,))
 
+    # Update screens assignment
+    if body and body.screen_ids:
+        sets = ", ".join("%s" for _ in body.screen_ids)
+        # Assign selected screens to this playlist
+        db.execute(
+            f"UPDATE screens SET playlist_id = %s WHERE id IN ({sets}) AND status = 'paired'",
+            (playlist_id, *body.screen_ids),
+        )
+        # Clear this playlist from screens not in the selection
+        db.execute(
+            f"UPDATE screens SET playlist_id = NULL WHERE playlist_id = %s AND id NOT IN ({sets})",
+            (playlist_id, *body.screen_ids),
+        )
+    else:
+        # Default: if no specific screen_ids given, assign all paired screens
+        paired_screens = db.query("SELECT id FROM screens WHERE status = 'paired'")
+        if paired_screens:
+            db.execute("UPDATE screens SET playlist_id = %s WHERE status = 'paired'", (playlist_id,))
+        else:
+            db.execute("UPDATE screens SET playlist_id = NULL WHERE playlist_id = %s", (playlist_id,))
+
     # Wake player if currently playing
     from server.state import PLAYER
-    PLAYER.skip()
+    if not PLAYER.is_playing:
+        PLAYER.start()
+    else:
+        PLAYER.skip()
+
+    row = db.query_one("SELECT * FROM playlists WHERE id = %s", (playlist_id,))
+    return _to_playlist_public(row, load_items=True)
+
+
+@router.post("/{playlist_id}/deactivate", response_model=PlaylistPublic)
+def deactivate_playlist(playlist_id: int) -> PlaylistPublic:
+    """Stop playing this playlist and unassign from all screens."""
+    row = db.query_one("SELECT * FROM playlists WHERE id = %s", (playlist_id,))
+    if not row:
+        raise HTTPException(404, "Không tìm thấy playlist")
+
+    db.execute("UPDATE playlists SET is_active = FALSE WHERE id = %s", (playlist_id,))
+    db.execute("UPDATE screens SET playlist_id = NULL WHERE playlist_id = %s", (playlist_id,))
+
+    from server.state import PLAYER
+    has_active = db.query_one("SELECT id FROM playlists WHERE is_active = TRUE LIMIT 1")
+    if not has_active:
+        PLAYER.stop()
+    else:
+        PLAYER.skip()
 
     row = db.query_one("SELECT * FROM playlists WHERE id = %s", (playlist_id,))
     return _to_playlist_public(row, load_items=True)
@@ -239,6 +318,18 @@ def remove_item_from_playlist(playlist_id: int, item_id: int) -> PlaylistPublic:
         raise HTTPException(404, "Không tìm thấy playlist")
 
     db.execute("DELETE FROM playlist_items WHERE id = %s AND playlist_id = %s", (item_id, playlist_id))
+
+    if pl_row.get("is_active"):
+        from server.state import PLAYER
+        remaining = (db.query_one("SELECT COUNT(*) AS c FROM playlist_items WHERE playlist_id = %s", (playlist_id,)) or {}).get("c", 0)
+        if remaining == 0:
+            PLAYER.skip()
+        else:
+            snap = PLAYER.snapshot()
+            cur = snap.get("creative")
+            if cur and cur.get("playlist_item_id") == item_id:
+                PLAYER.skip()
+
     return _to_playlist_public(pl_row, load_items=True)
 
 

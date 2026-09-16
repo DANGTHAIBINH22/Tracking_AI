@@ -46,6 +46,11 @@ class PlaylistPlayer:
         with self._lock:
             return self._smart_targeting
 
+    @property
+    def is_playing(self) -> bool:
+        with self._lock:
+            return self._playing
+
     def set_smart_targeting(self, enabled: bool) -> None:
         with self._lock:
             self._smart_targeting = bool(enabled)
@@ -64,6 +69,8 @@ class PlaylistPlayer:
         A ranking rather than a single winner, because the boundary case needs a
         runner-up: when the best match is the advert just finishing, repeating it
         back to back is worse than showing the next most relevant one.
+        We do not interrupt the currently playing creative mid-airing.
+        The ranking is held and applied naturally when the current advert finishes.
         """
         if not ranked_ids:
             return
@@ -72,13 +79,6 @@ class PlaylistPlayer:
                 return
             self._ranking = list(ranked_ids)
             self._ranked_at = time.time()
-            best = ranked_ids[0]
-            if self._creative and self._creative.get("id") == best:
-                return
-            self._target_requested_id = best
-            elapsed = time.time() - self._started_at
-            if elapsed >= 3.0:
-                self._stop.set()
 
     def _fresh_preference(self, items: list[dict], exclude_id: int | None) -> dict | None:
         """Best match for the current audience, skipping the advert just shown.
@@ -116,9 +116,10 @@ class PlaylistPlayer:
             )
             if items:
                 return items
-        return db.query(
-            "SELECT * FROM creatives WHERE enabled = TRUE ORDER BY position ASC, id ASC"
-        )
+        # If there is no active playlist or it has no items, do NOT fall back
+        # to playing all creatives from the library. Playlists are the sole
+        # authority for what airs on screen.
+        return []
 
     # ---------- lifecycle ----------
 
@@ -156,7 +157,7 @@ class PlaylistPlayer:
     def snapshot(self) -> dict:
         with self._lock:
             if not self._playing or self._creative is None:
-                return {"playing": self._playing, "airing_id": None, "creative": None,
+                return {"playing": False, "airing_id": None, "creative": None,
                         "started_at": None, "elapsed": 0.0, "remaining": 0.0}
             elapsed = time.time() - self._started_at
             duration = float(self._creative["duration"])
@@ -271,10 +272,6 @@ class PlaylistPlayer:
             t_start = time.time()
             while self._playing and (time.time() - t_start) < total_duration:
                 remaining = total_duration - (time.time() - t_start)
-                with self._lock:
-                    has_target = self._target_requested_id is not None
-                if has_target and (time.time() - t_start) >= 3.0:
-                    break
                 self._stop.wait(timeout=min(0.5, remaining))
                 if self._stop.is_set():
                     break

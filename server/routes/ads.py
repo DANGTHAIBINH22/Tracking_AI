@@ -308,3 +308,9 @@ def delete_ad(ad_id: int) -> None:
     other = db.query_one("SELECT id FROM creatives WHERE filename = %s LIMIT 1", (filename,))
     if not other:
         (MEDIA_DIR / filename).unlink(missing_ok=True)
+
+    from server.state import PLAYER
+    snap = PLAYER.snapshot()
+    cur = snap.get("creative")
+    if cur and cur.get("id") == ad_id:
+        PLAYER.skip()

@@ -69,6 +69,8 @@ export type PlaylistPublic = {
   item_count: number;
   total_duration: number;
   items: PlaylistItemPublic[];
+  assigned_screen_ids?: number[];
+  assigned_screen_names?: string[];
 };
 
 export type TargetSuggestion = {
@@ -141,6 +143,11 @@ export type ScreenPublic = {
   pairing_code: string | null;
   last_seen: number | null;
   created_at: number;
+  playlist_id?: number | null;
+  playlist_name?: string | null;
+  user_id?: number | null;
+  account_name?: string | null;
+  account_username?: string | null;
 };
 
 export type NowPlaying = {
@@ -240,6 +247,57 @@ export type CaptureConfig = {
   max_width: number;
   jpeg_quality: number;
   default_source: string;
+};
+
+/** One person, for the whole time they stayed in a session's frame. */
+export type TrackingSessionTrack = {
+  track_id: number;
+  first_seen: number;
+  last_seen: number;
+  presence_seconds: number;
+  dwell_seconds: number;
+  frames: number;
+  attentive_frames: number;
+  attentive: boolean;
+  gender: string | null;
+  age: number | null;
+  age_group: string | null;
+};
+
+export type TrackingSessionPublic = {
+  id: number;
+  session_code: string;
+  device_id: string;
+  screen_id: number | null;
+  source: string;
+  started_at: number;
+  ended_at: number | null;
+  started_at_text: string;
+  ended_at_text: string | null;
+  duration_seconds: number;
+  status: "active" | "completed";
+  total_footfall: number;
+  total_impressions: number;
+  attention_rate: number;
+  avg_dwell_time: number;
+  peak_people: number;
+  /** false for rows recorded before the engine kept a per-track ledger: their
+   *  demographics were counted per frame, so they are reported as unknown. */
+  has_track_detail: boolean;
+  unique_tracks: number;
+  total_track_frames: number;
+  male_count: number;
+  female_count: number;
+  unknown_gender_count: number;
+  age_breakdown: Record<string, number>;
+  avg_age: number | null;
+  avg_presence_seconds: number;
+  impressions_per_minute: number;
+  notes: string;
+  demographics_json: string;
+  tracks_json: string;
+  /** Only populated by getSession(); the listing leaves it empty. */
+  tracks: TrackingSessionTrack[];
 };
 
 /** The magic source string that puts the engine in "wait for a screen" mode. */
@@ -367,9 +425,17 @@ export const api = {
   checkScreenStatus: (code: string) =>
     request<ScreenStatusResponse>(`/api/screens/check-status?code=${encodeURIComponent(code)}`),
   verifyScreenToken: (token: string) =>
-    request<{ valid: boolean; name?: string; location?: string }>(
-      `/api/screens/verify-token?token=${encodeURIComponent(token)}`,
-    ),
+    request<{
+      valid: boolean;
+      id?: number;
+      name?: string;
+      location?: string;
+      playlist_id?: number | null;
+      playlist_name?: string | null;
+      user_id?: number | null;
+      account_name?: string | null;
+      account_username?: string | null;
+    }>(`/api/screens/verify-token?token=${encodeURIComponent(token)}`),
   listScreens: () => request<ScreenPublic[]>("/api/screens"),
   pairScreen: (data: { pairing_code: string; name: string; location?: string }) =>
     request<ScreenPublic>("/api/screens/pair", {
@@ -489,8 +555,13 @@ export const api = {
     }),
   deletePlaylist: (id: number) =>
     request<void>(`/api/playlists/${id}`, { method: "DELETE" }),
-  activatePlaylist: (id: number) =>
-    request<PlaylistPublic>(`/api/playlists/${id}/activate`, { method: "POST" }),
+  activatePlaylist: (id: number, screenIds?: number[]) =>
+    request<PlaylistPublic>(`/api/playlists/${id}/activate`, {
+      method: "POST",
+      body: JSON.stringify({ screen_ids: screenIds || [] }),
+    }),
+  deactivatePlaylist: (id: number) =>
+    request<PlaylistPublic>(`/api/playlists/${id}/deactivate`, { method: "POST" }),
   addPlaylistItem: (playlistId: number, creativeId: number, duration?: number) =>
     request<PlaylistPublic>(`/api/playlists/${playlistId}/items`, {
       method: "POST",
@@ -546,10 +617,14 @@ export const api = {
 
   captureState: () => request<CaptureState>("/api/capture/state"),
   captureConfig: () => request<CaptureConfig>("/api/capture/config"),
-  captureStart: (source?: string) =>
+  captureStart: (source?: string, deviceId?: string | number, screenId?: number) =>
     request<CaptureState>("/api/capture/start", {
       method: "POST",
-      body: JSON.stringify({ source: source || null }),
+      body: JSON.stringify({
+        source: source || null,
+        device_id: deviceId !== undefined && deviceId !== null ? String(deviceId) : null,
+        screen_id: screenId || null,
+      }),
     }),
   captureStop: () => request<CaptureState>("/api/capture/stop", { method: "POST" }),
   captureSources: () => request<{ value: string; label: string; type: string; description?: string }[]>("/api/capture/sources"),
@@ -577,4 +652,11 @@ export const api = {
     ),
   timeline: (limit = 40) => request<AiringRow[]>(`/api/analytics/timeline?limit=${limit}`),
   thresholds: () => request<Thresholds>("/api/analytics/settings"),
+  listSessions: (deviceId?: string | number) =>
+    request<TrackingSessionPublic[]>(
+      `/api/sessions${deviceId !== undefined && deviceId !== null ? `?device_id=${encodeURIComponent(String(deviceId))}` : ""}`
+    ),
+  getSession: (id: number) => request<TrackingSessionPublic>(`/api/sessions/${id}`),
+  deleteSession: (id: number) =>
+    request<{ ok: boolean }>(`/api/sessions/${id}`, { method: "DELETE" }),
 };
