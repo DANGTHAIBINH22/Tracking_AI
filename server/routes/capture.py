@@ -86,7 +86,11 @@ _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 
 # A subfolder of data/ is a named set of clips rather than a stray upload, so it
 # gets a heading in the picker instead of 35 unlabelled buttons in one row.
-_FOLDER_LABELS = {"age_kids": "Trẻ em & thiếu niên (kiểm tra ước lượng tuổi)"}
+_FOLDER_LABELS = {
+    "age_kids": "Trẻ em & thiếu niên (kiểm tra ước lượng tuổi)",
+    "age_adults": "Người trung niên & cao tuổi (kiểm tra 35-55 / >55)",
+    "retail": "Bối cảnh bán lẻ (khách đi ngang, chọn hàng, quầy thu ngân)",
+}
 
 # The child/teen set is named by subject prefix — see eval/age_kids/manifest.tsv
 # — so a label can say which age band a clip exercises instead of echoing the
@@ -98,17 +102,26 @@ _CLIP_PREFIXES = (
     ("teen_", "🧑", "Thiếu niên ~13-25"),
     ("mixed_", "👨‍👧", "Trẻ em + người lớn"),
     ("farfield_", "🔭", "Mặt ở xa (~35-50px)"),
+    ("senior_", "🧓", "Cao tuổi >55"),
+    ("grandmother_", "🧓", "Cao tuổi >55"),
+    ("grandparents_", "🧓", "Cao tuổi + trẻ em"),
+    ("two_generations_", "🧓", "Hai thế hệ trong một khung"),
+    ("adult_", "🧑‍💼", "Trung niên ~35-55"),
 )
 
 
-def _clip_label(stem: str, filename: str) -> str:
+def _clip_label(stem: str, filename: str, *, in_folder: bool) -> str:
+    """A button caption. `in_folder` clips are already grouped under a heading,
+    so they drop the filename and the trailing mixkit id that the top-level
+    captions keep — "Browsing Supermarket Items 25438
+    (browsing_supermarket_items-25438.mp4)" said the same thing three times."""
     lowered = stem.lower()
     for prefix, emoji, what in _CLIP_PREFIXES:
         if lowered.startswith(prefix):
-            # Drop the prefix and the trailing mixkit id: "child_girl_legos-42196"
-            # reads better as "girl legos".
             rest = stem[len(prefix):].rsplit("-", 1)[0].replace("_", " ")
             return f"{emoji} {what}: {rest}"
+    if in_folder:
+        return f"🎬 {stem.rsplit('-', 1)[0].replace('_', ' ').replace('-', ' ').capitalize()}"
     if "store" in lowered or "aisle" in lowered:
         return f"🛒 Video mẫu: TTTM / Siêu thị ({filename})"
     if "walking" in lowered:
@@ -158,7 +171,7 @@ def list_available_sources() -> list[dict]:
             rel = f.relative_to(data_dir).as_posix()
             results.append({
                 "value": f"data/{rel}",
-                "label": _clip_label(f.stem, f.name),
+                "label": _clip_label(f.stem, f.name, in_folder=bool(group)),
                 "type": "file",
                 "group": group,
                 "description": f"Video giả lập luồng camera từ file {rel}",

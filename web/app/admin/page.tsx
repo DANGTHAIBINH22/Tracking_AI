@@ -168,8 +168,11 @@ export default function AdminPage() {
     try {
       const list = await api.captureSources();
       setSourcesList(list);
-    } catch {
-      // ignore
+    } catch (err) {
+      // Not fatal — the picker renders its own "thử lại" state — but swallowing
+      // this without a trace left no way to tell a network failure from a
+      // genuinely empty data/ directory.
+      console.error("Không nạp được danh sách nguồn phát:", err);
     }
   }, []);
 
@@ -237,6 +240,13 @@ export default function AdminPage() {
     };
 
     fetchState();
+    // Once on mount, not inside fetchState: the source list only changes when
+    // someone uploads a clip, so re-reading it every 3s alongside the capture
+    // poll would be waste. Leaving it out of the mount path entirely was the
+    // bug — sourcesList stayed empty until the operator happened to trigger an
+    // action, and until then the picker showed its hardcoded fallback as if
+    // those three entries were everything available.
+    loadSources();
     api.captureConfig().then((cfg) => { if (!ignore) setConfig(cfg); }).catch(() => undefined);
     api.thresholds().then((th) => { if (!ignore) setThresholds(th); }).catch(() => undefined);
     api.health().then((h) => { if (!ignore) setHealth(h); }).catch(() => undefined);
@@ -247,7 +257,7 @@ export default function AdminPage() {
       ignore = true;
       clearInterval(id);
     };
-  }, [isAuthenticated, loadScreens]);
+  }, [isAuthenticated, loadScreens, loadSources]);
 
   const isSmartTargeting = stats?.smart_targeting !== undefined ? stats.smart_targeting : smartTargeting;
 
@@ -1368,50 +1378,23 @@ export default function AdminPage() {
                             );
                           })()
                         ) : (
-                          <>
+                          // No hardcoded fallback list here. There used to be
+                          // three buttons, which rendered whenever the fetch
+                          // had not landed and looked exactly like a complete
+                          // source list — so a failed load was indistinguishable
+                          // from "this machine only has three clips", and every
+                          // video added since stayed invisible. An empty list is
+                          // now reported as what it is.
+                          <div className="flex items-center gap-2 text-slate-500">
+                            <span>Chưa nạp được danh sách nguồn phát.</span>
                             <button
                               type="button"
-                              onClick={() => {
-                                setSource("0");
-                                setMode("server");
-                              }}
-                              className={`rounded-lg border px-2.5 py-1 text-xs transition ${
-                                source === "0"
-                                  ? "border-emerald-600 bg-emerald-50 font-semibold text-emerald-800"
-                                  : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-                              }`}
+                              onClick={() => loadSources()}
+                              className="rounded-lg border border-slate-300 bg-white px-2.5 py-1 font-semibold text-slate-700 transition hover:border-emerald-500 hover:bg-slate-50"
                             >
-                              Webcam máy tính (Index 0)
+                              Thử lại
                             </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSource("data/store-aisle-detection.mp4");
-                                setMode("server");
-                              }}
-                              className={`rounded-lg border px-2.5 py-1 text-xs transition ${
-                                source === "data/store-aisle-detection.mp4"
-                                  ? "border-emerald-600 bg-emerald-50 font-semibold text-emerald-800"
-                                  : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-                              }`}
-                            >
-                              Video TTTM 1: Lối đi siêu thị
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSource("data/face-demographics-walking-and-pause.mp4");
-                                setMode("server");
-                              }}
-                              className={`rounded-lg border px-2.5 py-1 text-xs transition ${
-                                source === "data/face-demographics-walking-and-pause.mp4"
-                                  ? "border-emerald-600 bg-emerald-50 font-semibold text-emerald-800"
-                                  : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-                              }`}
-                            >
-                              Video TTTM 2: Đi bộ & Dừng lại nhìn
-                            </button>
-                          </>
+                          </div>
                         )}
                       </div>
                     </div>
