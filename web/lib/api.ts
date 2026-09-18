@@ -234,7 +234,11 @@ export type IngestStatus = {
 
 export type CaptureState = {
   running: boolean;
+  /** The whole queue, "|"-joined, when several clips are running back to back. */
   source: string | null;
+  /** The clip in that queue the engine is on right now. */
+  source_now?: string | null;
+  queue?: string[] | null;
   mode: "server" | "browser";
   fps: number;
   error: string | null;
@@ -633,11 +637,19 @@ export const api = {
 
   captureState: () => request<CaptureState>("/api/capture/state"),
   captureConfig: () => request<CaptureConfig>("/api/capture/config"),
-  captureStart: (source?: string, deviceId?: string | number, screenId?: number) =>
+  /** `sources` queues several clips back to back and takes precedence over
+   *  `source`; the engine resets the tracker at every clip boundary. */
+  captureStart: (
+    source?: string,
+    deviceId?: string | number,
+    screenId?: number,
+    sources?: string[],
+  ) =>
     request<CaptureState>("/api/capture/start", {
       method: "POST",
       body: JSON.stringify({
         source: source || null,
+        sources: sources && sources.length > 0 ? sources : null,
         device_id: deviceId !== undefined && deviceId !== null ? String(deviceId) : null,
         screen_id: screenId || null,
       }),

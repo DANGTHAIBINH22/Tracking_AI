@@ -32,7 +32,7 @@ from server import db
 from server.audience import AGE_GROUPS, normalize_age_group, target_covers
 from server.player import PlaylistPlayer
 from server.settings import SETTINGS
-from server.sources import BROWSER_SOURCE, BrowserSource, LocalCameraSource, is_browser_source
+from server.sources import BROWSER_SOURCE, BrowserSource, LocalCameraSource, PlaylistSource, is_browser_source
 from viz import draw_person, draw_fps
 
 # How many per-person rows one session may carry in `tracks_json`. A busy
@@ -95,6 +95,9 @@ class AnalyticsEngine:
         self._event_loop: asyncio.AbstractEventLoop | None = None
         self._fps = 0.0
         self._frame_index = 0
+        # The live source object, so snapshot() can ask a PlaylistSource which
+        # clip it is on. _source stays the whole queue; this is the cursor.
+        self._active_source: object | None = None
 
         # Session tracking per device
         self._current_session_id: int | None = None
@@ -445,6 +448,9 @@ class AnalyticsEngine:
                 "running": self._running,
                 "source": self._source,
                 "mode": "browser" if is_browser_source(self._source) else "server",
+                # Only differs from `source` while a queue is running.
+                "source_now": getattr(self._active_source, "current_spec", None) or self._source,
+                "queue": getattr(self._active_source, "specs", None),
                 "fps": round(self._fps, 1),
                 "frame_index": self._frame_index,
                 "people_now": len(metas),
@@ -638,12 +644,21 @@ class AnalyticsEngine:
 
     # ---------- capture loop ----------
 
-    def _open_source(self) -> LocalCameraSource | BrowserSource:
+    def _open_source(self) -> LocalCameraSource | PlaylistSource | BrowserSource:
         if is_browser_source(self._source):
             src = self.browser
             src.open()
             return src
-        src = LocalCameraSource(self._source or "0")
+        spec = self._source or "0"
+        # A separator in the spec means several clips queued back to back. It
+        # travels as one string so `_source` stays a single value everywhere it
+        # is already used — the session row, the snapshot, and the "is this a
+        # different source?" check in /api/capture/start.
+        src: LocalCameraSource | PlaylistSource
+        if PlaylistSource.SEPARATOR in spec:
+            src = PlaylistSource(spec.split(PlaylistSource.SEPARATOR))
+        else:
+            src = LocalCameraSource(spec)
         src.open()
         return src
 
@@ -651,6 +666,7 @@ class AnalyticsEngine:
         source = None
         try:
             source = self._open_source()
+            self._active_source = source
             from_browser = isinstance(source, BrowserSource)
 
             self._pipeline = Pipeline()
@@ -729,6 +745,9 @@ class AnalyticsEngine:
             with self._lock:
                 self._running = False
                 self._latest_metas = []
+                # Released above; leaving the reference would make snapshot()
+                # keep reporting the last clip of a run that has ended.
+                self._active_source = None
 
     def _render(self, frame_bgr: np.ndarray, metas: list[PersonMeta], fps: float) -> None:
         canvas = frame_bgr.copy()

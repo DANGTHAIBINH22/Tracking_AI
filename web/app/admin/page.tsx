@@ -54,6 +54,11 @@ export default function AdminPage() {
   // clips (data/age_kids has 35), and rendering them all flat buried the two
   // webcam presets everyone actually starts from.
   const [openSourceGroups, setOpenSourceGroups] = useState<Record<string, boolean>>({});
+  // An ordered queue of clips to run back to back. Empty means the picker is in
+  // its normal "one click picks one source" mode; the two behaviours share the
+  // same buttons rather than duplicating the list.
+  const [queue, setQueue] = useState<string[]>([]);
+  const [queueMode, setQueueMode] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState(false);
@@ -373,14 +378,22 @@ export default function AdminPage() {
   const nowPlaying = stats?.now_playing ?? null;
   const browserMode = running && capture?.mode === "browser";
 
-  const startCapture = () =>
+  const startCapture = (queued?: string[]) =>
     act(async () => {
       const devId = selectedScreenId !== null ? selectedScreenId : "host";
       const scrId = typeof selectedScreenId === "number" ? selectedScreenId : undefined;
-      const res = await api.captureStart(mode === "browser" ? BROWSER_SOURCE : source || "0", devId, scrId);
+      const res = await api.captureStart(
+        mode === "browser" ? BROWSER_SOURCE : source || "0",
+        devId,
+        scrId,
+        mode === "browser" ? undefined : queued,
+      );
       setTimeout(() => loadDeviceSessions(selectedScreenId), 1200);
       return res;
     });
+
+  const toggleQueued = (value: string) =>
+    setQueue((prev) => (prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value]));
 
   const stopCapture = () =>
     act(async () => {
@@ -1227,8 +1240,19 @@ export default function AdminPage() {
                         {running ? "Luồng Camera AI Trực Tiếp" : "Camera đang tạm dừng"}
                       </span>
                       <span className="rounded bg-slate-200/80 px-1.5 py-0.5 font-mono text-[10px] text-slate-700">
-                        {mode === "browser" ? "Nguồn Kiosk (/screen)" : `Nguồn: ${source || "0"}`}
+                        {mode === "browser"
+                          ? "Nguồn Kiosk (/screen)"
+                          : // While a queue runs, the engine's own cursor is the
+                            // truth; `source` is the whole "|"-joined queue and
+                            // would be unreadable here.
+                            `Nguồn: ${(capture?.source_now ?? source ?? "0").split("/").pop()}`}
                       </span>
+                      {running && (capture?.queue?.length ?? 0) > 1 && (
+                        <span className="rounded bg-indigo-100 px-1.5 py-0.5 font-mono text-[10px] text-indigo-700">
+                          clip {(capture?.queue?.indexOf(capture?.source_now ?? "") ?? -1) + 1}/
+                          {capture?.queue?.length}
+                        </span>
+                      )}
                     </div>
                     <div className="flex items-center gap-2 text-[11px] font-mono text-slate-500">
                       <span>{stats?.fps?.toFixed(1) ?? "0.0"} FPS</span>
@@ -1258,7 +1282,7 @@ export default function AdminPage() {
                         </p>
                         <button
                           disabled={busy}
-                          onClick={startCapture}
+                          onClick={() => startCapture()}
                           className="rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white shadow-xs hover:bg-emerald-700 transition"
                         >
                           ▶ Bật phân tích camera
@@ -1309,6 +1333,21 @@ export default function AdminPage() {
                         <span className="font-semibold text-slate-800">
                           Video mẫu TTTM kiểm tra AI đếm người:
                         </span>
+                        <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setQueueMode((on) => !on);
+                            if (queueMode) setQueue([]);
+                          }}
+                          className={`rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition shadow-xs ${
+                            queueMode
+                              ? "border-indigo-500 bg-indigo-50 text-indigo-700"
+                              : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"
+                          }`}
+                        >
+                          {queueMode ? "✓ Đang chọn nhiều" : "☰ Chọn nhiều clip"}
+                        </button>
                         <label className="cursor-pointer rounded-lg border border-emerald-300 bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 transition hover:bg-emerald-100 shadow-xs">
                           + Tải lên video TTTM (.mp4)
                           <input
@@ -1318,7 +1357,51 @@ export default function AdminPage() {
                             onChange={handleUploadTestVideo}
                           />
                         </label>
+                        </div>
                       </div>
+
+                      {queueMode && (
+                        <div className="rounded-lg border border-indigo-200 bg-indigo-50/60 p-2 space-y-1.5">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-semibold text-indigo-900">
+                              Hàng đợi: {queue.length} clip
+                            </span>
+                            <span className="text-[11px] text-indigo-700">
+                              chạy lần lượt, hết clip cuối thì quay lại clip đầu
+                            </span>
+                            <div className="ml-auto flex gap-1.5">
+                              <button
+                                type="button"
+                                disabled={queue.length === 0 || busy}
+                                onClick={() => setQueue([])}
+                                className="rounded-lg border border-slate-300 bg-white px-2.5 py-1 font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-40"
+                              >
+                                Xoá hết
+                              </button>
+                              <button
+                                type="button"
+                                disabled={queue.length === 0 || busy}
+                                onClick={() => startCapture(queue)}
+                                className="rounded-lg bg-indigo-600 px-2.5 py-1 font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-40"
+                              >
+                                ▶ Chạy liên tục {queue.length} clip
+                              </button>
+                            </div>
+                          </div>
+                          {queue.length > 0 && (
+                            <ol className="flex flex-wrap gap-1 text-[11px] text-indigo-900">
+                              {queue.map((value, index) => (
+                                <li
+                                  key={value}
+                                  className="rounded border border-indigo-200 bg-white px-1.5 py-0.5"
+                                >
+                                  {index + 1}. {value.split("/").pop()}
+                                </li>
+                              ))}
+                            </ol>
+                          )}
+                        </div>
+                      )}
 
                       <div className="flex flex-wrap gap-1.5">
                         {sourcesList.length > 0 ? (
@@ -1328,24 +1411,42 @@ export default function AdminPage() {
                               if (s.group) (acc[s.group] ||= []).push(s);
                               return acc;
                             }, {});
-                            const btn = (s: (typeof sourcesList)[number]) => (
-                              <button
-                                key={s.value}
-                                type="button"
-                                title={s.description}
-                                onClick={() => {
-                                  setSource(s.value);
-                                  setMode("server");
-                                }}
-                                className={`rounded-lg border px-2.5 py-1 text-xs transition ${
-                                  source === s.value
-                                    ? "border-emerald-600 bg-emerald-50 font-semibold text-emerald-800 shadow-xs"
-                                    : "border-slate-200 bg-white text-slate-700 hover:border-emerald-500 hover:bg-slate-50"
-                                }`}
-                              >
-                                {s.label}
-                              </button>
-                            );
+                            // One button, two modes. In queue mode a click adds
+                            // or removes the clip and shows its position; the
+                            // webcam and browser presets stay single-pick,
+                            // because a queue of live cameras is not a thing.
+                            const btn = (s: (typeof sourcesList)[number]) => {
+                              const queueable = queueMode && s.type === "file";
+                              const at = queue.indexOf(s.value);
+                              const picked = queueable ? at >= 0 : source === s.value;
+                              return (
+                                <button
+                                  key={s.value}
+                                  type="button"
+                                  title={s.description}
+                                  onClick={() => {
+                                    if (queueable) {
+                                      toggleQueued(s.value);
+                                      return;
+                                    }
+                                    setSource(s.value);
+                                    setMode("server");
+                                  }}
+                                  className={`rounded-lg border px-2.5 py-1 text-xs transition ${
+                                    picked
+                                      ? queueable
+                                        ? "border-indigo-500 bg-indigo-50 font-semibold text-indigo-800 shadow-xs"
+                                        : "border-emerald-600 bg-emerald-50 font-semibold text-emerald-800 shadow-xs"
+                                      : "border-slate-200 bg-white text-slate-700 hover:border-emerald-500 hover:bg-slate-50"
+                                  } ${queueMode && !queueable ? "opacity-40" : ""}`}
+                                >
+                                  {queueable && at >= 0 && (
+                                    <span className="mr-1 font-bold">{at + 1}.</span>
+                                  )}
+                                  {s.label}
+                                </button>
+                              );
+                            };
                             return (
                               <>
                                 {ungrouped.map(btn)}

@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from server.settings import SETTINGS
-from server.sources import is_browser_source
+from server.sources import PlaylistSource, is_browser_source
 from server.state import ENGINE
 
 router = APIRouter(prefix="/api/capture", tags=["capture"])
@@ -19,6 +19,11 @@ class CaptureStart(BaseModel):
     # "0" = default webcam; "browser" waits for a screen to push frames in over
     # /ws/ingest; anything else is a path/URL replayed as if it were live.
     source: str | None = None
+    # Several clips to play back to back, for a test run nobody has to sit and
+    # restart. Takes precedence over `source`. The engine resets the tracker at
+    # every clip boundary, so the run is a sequence of separate scenes rather
+    # than one long stream with track ids bleeding across the cuts.
+    sources: list[str] | None = None
     device_id: str | None = None
     screen_id: int | None = None
     notes: str = ""
@@ -40,13 +45,23 @@ def config() -> dict:
 def state() -> dict:
     snap = ENGINE.snapshot()
     return {"running": snap["running"], "source": snap["source"],
+            # `source` is the whole queue when several clips are running back to
+            # back; these two say where in it the engine currently is.
+            "source_now": snap.get("source_now"), "queue": snap.get("queue"),
             "mode": snap["mode"], "fps": snap["fps"], "error": snap["error"],
             "ingest": ENGINE.browser.status()}
 
 
 @router.post("/start")
 def start(body: CaptureStart | None = None) -> dict:
-    source = (body.source if body else None) or SETTINGS.default_source
+    queued = [s.strip() for s in (body.sources or [])] if body else []
+    queued = [s for s in queued if s]
+    if queued and any(is_browser_source(s) for s in queued):
+        raise HTTPException(400, "Không thể xếp hàng nguồn 'browser' cùng video — chọn một trong hai.")
+    source = (
+        PlaylistSource.SEPARATOR.join(queued) if queued
+        else (body.source if body else None) or SETTINGS.default_source
+    )
     device_id = (body.device_id if body else None) or "host"
     screen_id = body.screen_id if body else None
     notes = (body.notes if body else "") or ""
