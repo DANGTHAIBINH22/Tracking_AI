@@ -375,14 +375,30 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getAuthToken();
   const authHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
 
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    headers:
-      init?.body instanceof FormData
-        ? { ...authHeaders, ...(init?.headers ?? {}) }
-        : { "Content-Type": "application/json", ...authHeaders, ...(init?.headers ?? {}) },
-    cache: "no-store",
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      headers:
+        init?.body instanceof FormData
+          ? { ...authHeaders, ...(init?.headers ?? {}) }
+          : { "Content-Type": "application/json", ...authHeaders, ...(init?.headers ?? {}) },
+      cache: "no-store",
+    });
+  } catch (err) {
+    // The API being down is the most common failure in development, and it is
+    // the one fetch reports worst: it rejects before any of the status handling
+    // below, so the operator gets a bare "TypeError: Failed to fetch" and a
+    // stack trace pointing into this file rather than at the stopped server.
+    // API_BASE can legitimately be "" (same-origin), and this may run during
+    // SSR, so window is not safe to reach for unguarded.
+    const where =
+      API_BASE || (typeof window !== "undefined" ? window.location.origin : "same-origin");
+    throw new Error(
+      `Không kết nối được API tại ${where} — kiểm tra server đã chạy chưa ` +
+        `(./run_web.sh). Chi tiết: ${(err as Error).message}`,
+    );
+  }
   if (!res.ok) {
     // FastAPI puts the human-readable reason in `detail`; surfacing it beats a
     // bare "500" when the real problem is "camera 0 is already in use".
