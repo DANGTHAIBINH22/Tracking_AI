@@ -16,6 +16,7 @@ import {
   getAuthToken,
   getStoredUser,
 } from "@/lib/api";
+import { AGE_OPTIONS, ANY } from "@/lib/taxonomy";
 import { useCameraIngest } from "@/lib/useCameraIngest";
 import { useLive } from "@/lib/useLive";
 import { Stat } from "@/components/Stat";
@@ -48,7 +49,11 @@ export default function AdminPage() {
   const [health, setHealth] = useState<Record<string, unknown> | null>(null);
   const [mode, setMode] = useState<"server" | "browser">("server");
   const [source, setSource] = useState("0");
-  const [sourcesList, setSourcesList] = useState<{ value: string; label: string; type: string; description?: string }[]>([]);
+  const [sourcesList, setSourcesList] = useState<{ value: string; label: string; type: string; group?: string; description?: string }[]>([]);
+  // Which data/ subfolder groups are expanded. A named set can hold dozens of
+  // clips (data/age_kids has 35), and rendering them all flat buried the two
+  // webcam presets everyone actually starts from.
+  const [openSourceGroups, setOpenSourceGroups] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState(false);
@@ -414,10 +419,13 @@ export default function AdminPage() {
       "Nữ",
       "Không xác định giới tính",
       "Tuổi trung bình",
-      "Nhóm <18",
+      "Nhóm <6",
+      "Nhóm 6-13",
+      "Nhóm 13-18",
       "Nhóm 18-35",
       "Nhóm 35-55",
       "Nhóm >55",
+      "Nhóm <18 (trước khi tách)",
       "Không xác định tuổi",
       "Lượt tiếp cận (Footfall)",
       "Lượt xem thực (Impressions)",
@@ -442,10 +450,16 @@ export default function AdminPage() {
       demoCell(s, s.female_count),
       demoCell(s, s.unknown_gender_count),
       demoCell(s, s.avg_age),
-      demoCell(s, s.age_breakdown?.["<18"] ?? 0),
+      demoCell(s, s.age_breakdown?.["<6"] ?? 0),
+      demoCell(s, s.age_breakdown?.["6-13"] ?? 0),
+      demoCell(s, s.age_breakdown?.["13-18"] ?? 0),
       demoCell(s, s.age_breakdown?.["18-35"] ?? 0),
       demoCell(s, s.age_breakdown?.["35-55"] ?? 0),
       demoCell(s, s.age_breakdown?.[">55"] ?? 0),
+      // Sessions recorded before `<18` was split into the three brackets above.
+      // Kept as its own column rather than folded into one of them: the stored
+      // row is a bracket, not an age, so there is nothing to re-bucket from.
+      demoCell(s, s.age_breakdown?.["<18"] ?? 0),
       demoCell(s, s.age_breakdown?.unknown ?? 0),
       s.total_footfall,
       s.total_impressions,
@@ -1298,23 +1312,61 @@ export default function AdminPage() {
 
                       <div className="flex flex-wrap gap-1.5">
                         {sourcesList.length > 0 ? (
-                          sourcesList.map((s) => (
-                            <button
-                              key={s.value}
-                              type="button"
-                              onClick={() => {
-                                setSource(s.value);
-                                setMode("server");
-                              }}
-                              className={`rounded-lg border px-2.5 py-1 text-xs transition ${
-                                source === s.value
-                                  ? "border-emerald-600 bg-emerald-50 font-semibold text-emerald-800 shadow-xs"
-                                  : "border-slate-200 bg-white text-slate-700 hover:border-emerald-500 hover:bg-slate-50"
-                              }`}
-                            >
-                              {s.label}
-                            </button>
-                          ))
+                          (() => {
+                            const ungrouped = sourcesList.filter((s) => !s.group);
+                            const groups = sourcesList.reduce<Record<string, typeof sourcesList>>((acc, s) => {
+                              if (s.group) (acc[s.group] ||= []).push(s);
+                              return acc;
+                            }, {});
+                            const btn = (s: (typeof sourcesList)[number]) => (
+                              <button
+                                key={s.value}
+                                type="button"
+                                title={s.description}
+                                onClick={() => {
+                                  setSource(s.value);
+                                  setMode("server");
+                                }}
+                                className={`rounded-lg border px-2.5 py-1 text-xs transition ${
+                                  source === s.value
+                                    ? "border-emerald-600 bg-emerald-50 font-semibold text-emerald-800 shadow-xs"
+                                    : "border-slate-200 bg-white text-slate-700 hover:border-emerald-500 hover:bg-slate-50"
+                                }`}
+                              >
+                                {s.label}
+                              </button>
+                            );
+                            return (
+                              <>
+                                {ungrouped.map(btn)}
+                                {Object.entries(groups).map(([name, items]) => {
+                                  // Keep a collapsed group open when the running
+                                  // source is inside it, so the active choice is
+                                  // never hidden behind a toggle.
+                                  const hasActive = items.some((s) => s.value === source);
+                                  const open = openSourceGroups[name] ?? hasActive;
+                                  return (
+                                    <div key={name} className="w-full space-y-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setOpenSourceGroups((prev) => ({ ...prev, [name]: !open }))
+                                        }
+                                        className="flex w-full items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-left text-xs font-semibold text-slate-700 transition hover:border-emerald-500 hover:bg-slate-50"
+                                      >
+                                        <span className="text-slate-400">{open ? "▾" : "▸"}</span>
+                                        {name}
+                                        <span className="ml-auto rounded-full bg-slate-100 px-1.5 text-[10px] font-medium text-slate-500">
+                                          {items.length}
+                                        </span>
+                                      </button>
+                                      {open && <div className="flex flex-wrap gap-1.5 pl-3">{items.map(btn)}</div>}
+                                    </div>
+                                  );
+                                })}
+                              </>
+                            );
+                          })()
                         ) : (
                           <>
                             <button
@@ -1500,7 +1552,7 @@ export default function AdminPage() {
                               ? "Nữ"
                               : "Khán giả"}
                             {stats.recommendation.viewer_approx_age != null &&
-                              ` · ~${Math.round(stats.recommendation.viewer_approx_age)} tuổi`}
+                              ` · ~${stats.recommendation.viewer_approx_age} tuổi`}
                           </span>
                         </div>
 
@@ -1783,7 +1835,7 @@ export default function AdminPage() {
                             )}
                           </td>
                           <td className="py-3 px-3 text-right font-mono text-slate-700">
-                            {s.avg_age != null ? `${s.avg_age.toFixed(1)}` : <span className="text-slate-300">—</span>}
+                            {s.avg_age ?? <span className="text-slate-300">—</span>}
                           </td>
                           <td className="py-3 px-3 text-right font-mono text-slate-700">
                             {s.avg_dwell_time.toFixed(1)}s
@@ -1958,12 +2010,19 @@ export default function AdminPage() {
                   const femalePct = totalGender > 0 ? 100 - malePct : 0;
 
                   const ages = sessionDetailModal.age_breakdown || {};
-                  const ageBrackets: Record<string, number> = {
-                    "<18": Number(ages["<18"] || 0),
-                    "18-35": Number(ages["18-35"] || 0),
-                    "35-55": Number(ages["35-55"] || 0),
-                    ">55": Number(ages[">55"] || 0),
-                  };
+                  // Built from AGE_OPTIONS so this cannot drift from the
+                  // backend's AGE_GROUPS the way the hardcoded four did. The
+                  // pre-split `<18` bracket is appended only when old sessions
+                  // in view still carry it.
+                  const ageBrackets: Record<string, number> = Object.fromEntries(
+                    AGE_OPTIONS.filter((o) => o.value !== ANY).map((o) => [
+                      o.value,
+                      Number(ages[o.value] || 0),
+                    ]),
+                  );
+                  if (Number(ages["<18"] || 0) > 0) {
+                    ageBrackets["<18"] = Number(ages["<18"]);
+                  }
                   const totalAge = Object.values(ageBrackets).reduce((acc, v) => acc + v, 0);
 
                   return (
@@ -1982,7 +2041,7 @@ export default function AdminPage() {
                           <span>
                             Tuổi trung bình:{" "}
                             <span className="font-semibold text-slate-600">
-                              {sessionDetailModal.avg_age != null ? `${sessionDetailModal.avg_age.toFixed(1)} tuổi` : "—"}
+                              {sessionDetailModal.avg_age != null ? `${sessionDetailModal.avg_age} tuổi` : "—"}
                             </span>
                           </span>
                         </div>
@@ -2081,7 +2140,7 @@ export default function AdminPage() {
                             )}
                           </td>
                           <td className="py-1.5 px-2 text-right font-mono text-slate-600">
-                            {t.age != null ? t.age.toFixed(0) : <span className="text-slate-300">—</span>}
+                            {t.age ?? <span className="text-slate-300">—</span>}
                           </td>
                           <td className="py-1.5 px-2 text-slate-600">
                             {t.age_group || <span className="text-slate-300">—</span>}

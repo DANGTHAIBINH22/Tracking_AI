@@ -40,7 +40,7 @@ class TrackDetail(BaseModel):
     attentive_frames: int
     attentive: bool
     gender: str | None = None
-    age: float | None = None
+    age: int | None = None
     age_group: str | None = None
 
 
@@ -72,7 +72,7 @@ class SessionSummary(BaseModel):
     female_count: int
     unknown_gender_count: int
     age_breakdown: dict[str, int]
-    avg_age: float | None = None
+    avg_age: int | None = None
     avg_presence_seconds: float
     impressions_per_minute: float
 
@@ -101,6 +101,24 @@ def _loads(raw: Any, fallback: Any) -> Any:
         return fallback
 
 
+def _whole(value: Any) -> int | None:
+    """Any stored age -> whole years, or None.
+
+    Ages are integers now (see `AgeGender.age`), but `tracks_json` and
+    `demographics_json` are frozen JSON: every session written before that
+    change holds values like 7.4 and 27.3. Pydantic will not coerce a float
+    with a fractional part into an `int` field, so without this a single old
+    session raises a ValidationError and takes the whole history listing with
+    it.
+    """
+    if value is None:
+        return None
+    try:
+        return round(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _clock(ts: float | None) -> str | None:
     """Epoch seconds -> 'YYYY-MM-DD HH:MM:SS' in the server's local time."""
     if ts is None:
@@ -127,7 +145,7 @@ def _parse_tracks(raw: Any) -> list[TrackDetail]:
                 attentive_frames=attentive_frames,
                 attentive=attentive_frames > 0,
                 gender=t.get("gender"),
-                age=t.get("age"),
+                age=_whole(t.get("age")),
                 age_group=t.get("age_group"),
             )
         )
@@ -156,8 +174,15 @@ def _summarize(row: dict, now: float, *, with_tracks: bool) -> SessionSummary:
         unknown_gender = sum(1 for t in tracks if not t.gender)
         age_breakdown = {g: sum(1 for t in tracks if t.age_group == g) for g in AGE_GROUPS}
         age_breakdown["unknown"] = sum(1 for t in tracks if not t.age_group)
+        # Comprehending over AGE_GROUPS alone drops any bracket not currently
+        # offered — a track stored under the pre-split `<18` counted in neither
+        # its own bucket nor "unknown", so the breakdown quietly summed to less
+        # than the session's track count.
+        for t in tracks:
+            if t.age_group and t.age_group not in age_breakdown:
+                age_breakdown[t.age_group] = sum(1 for o in tracks if o.age_group == t.age_group)
         known_ages = [t.age for t in tracks if t.age is not None]
-        avg_age = round(sum(known_ages) / len(known_ages), 1) if known_ages else None
+        avg_age = round(sum(known_ages) / len(known_ages)) if known_ages else None
         avg_presence = round(sum(t.presence_seconds for t in tracks) / len(tracks), 2)
         unique_tracks = len(tracks)
         total_frames = sum(t.frames for t in tracks)
@@ -167,7 +192,7 @@ def _summarize(row: dict, now: float, *, with_tracks: bool) -> SessionSummary:
         unknown_gender = int(genders.get("unknown", 0))
         age_breakdown = {g: int(ages.get(g, 0)) for g in AGE_GROUPS}
         age_breakdown["unknown"] = int(ages.get("unknown", 0))
-        avg_age = demo.get("avg_age") if has_detail else None
+        avg_age = _whole(demo.get("avg_age")) if has_detail else None
         avg_presence = float(demo.get("avg_presence_seconds") or 0.0) if has_detail else 0.0
         unique_tracks = int(demo.get("unique_tracks") or row["total_footfall"])
         total_frames = 0

@@ -17,10 +17,17 @@ export type Option = { value: string; label: string };
 /** Every dropdown offers "no preference" first; it is never a real bracket. */
 export const ANY = "all";
 
-/** Matches AGE_GROUPS in server/audience.py, in the same order. */
+/** Matches AGE_GROUPS in server/audience.py, in the same order.
+ *
+ *  `<18` is deliberately absent: it was split into the three brackets below.
+ *  Adverts saved before the split keep it, and `target_covers` in
+ *  server/audience.py still matches them against all three, but the form no
+ *  longer offers it — picking it would mean declining to say which child. */
 export const AGE_OPTIONS: Option[] = [
   { value: ANY, label: "Tất cả độ tuổi" },
-  { value: "<18", label: "<18 tuổi (Thiếu nhi / Học sinh)" },
+  { value: "<6", label: "<6 tuổi (Mầm non)" },
+  { value: "6-13", label: "6-13 tuổi (Thiếu nhi)" },
+  { value: "13-18", label: "13-18 tuổi (Thiếu niên / Học sinh)" },
   { value: "18-35", label: "18-35 tuổi (Thanh niên / GenZ)" },
   { value: "35-55", label: "35-55 tuổi (Trung niên / Gia đình)" },
   { value: ">55", label: ">55 tuổi (Cao tuổi / Dưỡng sinh)" },

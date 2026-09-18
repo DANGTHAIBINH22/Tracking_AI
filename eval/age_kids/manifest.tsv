@@ -1,0 +1,62 @@
+# Child/teen age-estimation test set — 35 Mixkit clips, fetched by eval/age_kids/fetch.sh into data/age_kids/.
+#
+# Two age columns, both EYEBALLED ESTIMATES, neither ground truth — stock
+# footage ships no birth dates:
+#   est_age_band   the clip's main subject(s), for reading the table
+#   eval_band      the LARGEST face specifically, which is what a largest-face
+#                  measurement actually compares against. On the mixed_ and
+#                  farfield_ clips that face is often the adult, so the two
+#                  columns disagree on purpose. "-" means the largest face is
+#                  not one person throughout: eval/age_kids/run_eval.py prints
+#                  those clips but does not score them, because a median across
+#                  two people has no right answer. That call belongs here, per
+#                  clip, and not to a spread threshold in the script — scoring
+#                  only the clips a given checkpoint happens to be steady on
+#                  would compare two checkpoints on two different sets.
+# eval_band is what eval/age_kids/run_eval.py scores. Use it for an age-GROUP
+# confusion matrix and for hunting gross failures. Do not quote an MAE from it.
+#
+# max_faces / max_face_px are from 6 frames sampled across each clip with
+# yolov8n-face @ conf 0.4. Compare max_face_px against CFG.min_face_px_for_age (24).
+# All clips are 1280x720 except child_girl_legos (720x1280, portrait).
+#
+# license: Mixkit License — free commercial/non-commercial use, no attribution
+# required, redistributing the raw clip is not. Source page for any clip:
+# https://mixkit.co/free-stock-video/?q=<mixkit_id>
+#
+file	mixkit_id	secs	max_faces	max_face_px	est_age_band	eval_band	subject / why it is in the set
+baby_laughing_rollover-8579.mp4	8579	21	1	265	0-1	0-1	infant, large frontal face — the bottom of the range, where an IMDB-trained head has almost no support
+baby_smiling_sofa-11671.mp4	11671	13	1	197	0-2	0-2	infant frontal, softer lighting
+baby_clapping_hands-16187.mp4	16187	9	2	159	0-2 + 25-35	25-35	infant against an adult face in the same frame; the adult's face is the larger one
+child_boy_smiling_orange_room-21702.mp4	21702	13	1	208	1-3	1-3	toddler, strong warm colour cast
+child_sad_boy_swings-13725.mp4	13725	12	1	86	4-6	4-6	young child outdoors, small-ish face
+child_sad_boy_to_camera-46713.mp4	46713	11	1	475	5-8	5-8	young child, near-frontal and very large — best case for the age head
+child_girl_legos-42196.mp4	42196	12	1	422	4-6	4-6	young child, portrait orientation, heavy occlusion by hands/toys
+child_girl_maths_livingroom-4792.mp4	4792	11	1	243	5-7	5-7	young child, downward gaze (tests pose x age interaction)
+child_unhappy_corner-5927.mp4	5927	15	1	127	6-9	6-9	child wearing glasses, dim indoor light
+child_boy_behind_window-23319.mp4	23319	32	1	616	5-9	5-9	backlit near-silhouette profile — expect the age head to struggle; keep it as a known-hard case
+child_boy_english_book-9004.mp4	9004	11	1	309	9-12	9-12	pre-teen, bright frontal
+child_girl_crying-4543.mp4	4543	5	1	529	8-11	8-11	pre-teen, extreme close-up, occluding hand
+child_girl_coughing-4536.mp4	4536	14	1	171	10-13	10-13	pre-teen, occluding hand
+children_playing_chess-4762.mp4	4762	8	3	203	10-13	10-13	two pre-teens, profile and three-quarter views
+children_classroom_raising_hands-35954.mp4	35954	21	7	129	8-10 + adult	8-10	up to 7 faces at once — crowd case, also stresses track-id stability. The largest face stays the same child in profile throughout (checked frame by frame), so it is scored; the wide per-sample spread run_eval flags here is the model struggling with that profile, not the subject changing
+child_girl_library_homework-4531.mp4	4531	23	1	158	13-16	13-16	early teen, the band most likely to cross the 13-18 / 18-35 boundary
+teen_girl_armchair_classroom-28318.mp4	28318	12	1	305	14-17	14-17	teen, large frontal
+teen_student_helped_by_classmate-28319.mp4	28319	17	2	259	16-20	16-20	two teens/young adults side by side
+teen_boy_girl_walking_school-28320.mp4	28320	12	2	155	16-19	16-19	two teens walking — moving subject, like a passer-by at a standee
+teen_frustrated_student-28321.mp4	28321	22	1	177	16-19	16-19	teen, three-quarter view
+teen_boy_studying_home-4761.mp4	4761	6	1	152	16-19	16-19	teen, downward gaze
+teen_student_reading_book-50127.mp4	50127	11	1	232	16-19	16-19	teen, soft indoor light
+teen_students_with_teacher-8814.mp4	8814	11	4	169	16-19 + adult	16-19	teens plus an adult teacher in one frame
+teen_walking_in_town-28198.mp4	28198	25	5	128	18-22	18-22	several young adults walking past camera — closest clip to the signage scenario
+teen_girls_selfie-51241.mp4	51241	5	2	113	20-25	20-25	young adults (mixkit tags them "teenager"; they do not look under 18 — the label is the point of the test)
+teen_women_photos-51258.mp4	51258	10	2	129	20-25	20-25	as above
+mixed_father_son_reading-4542.mp4	4542	9	3	140	6-9 + 30-40	30-40	child and adult, both frontal — the two must not collapse into one bucket
+mixed_mother_daughter_reading-4874.mp4	4874	18	2	170	6-9 + 30-40	30-40	child and adult, outdoors
+children_teacher_learning-36046.mp4	36046	19	5	110	5-8 + 25-35	-	several children with one adult; the shot cuts between them, so the largest face is a child for the first two thirds and the teacher for the rest — verified frame by frame, both read correctly, there is just no one band to score a median against
+mixed_library_reading_group-4510.mp4	4510	16	4	137	12-16 + 18-25	18-25	mixed teens and young adults
+mixed_girl_swing_playground-47628.mp4	47628	9	1	118	5-8 + 22-28	22-28	child on a swing plus an adult; the adult's face is the larger one
+farfield_child_sandbox_play-47479.mp4	47479	6	1	38	3-5	3-5	face ~38px — just above CFG.min_face_px_for_age, expect it to be shaky
+farfield_boy_deflated_ball-13727.mp4	13727	7	1	35	7-10	7-10	face ~35px and too blurred to judge by eye; the band comes from the clip, not from the crop
+farfield_family_walking_park-33729.mp4	33729	10	1	43	5-8 + adult	25-40	family at distance, ~43px faces; the largest is an adult, not the child
+farfield_woman_daughter_sidewalk-8717.mp4	8717	15	0-1	49	4-7 + 25-35	-	pair walking past at distance; the detector misses them on most frames and finds the child on some, the adult on others, so there is no one subject to score

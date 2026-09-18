@@ -143,17 +143,26 @@ class SuggestRequest(BaseModel):
 def suggest_target(body: SuggestRequest) -> TargetSuggestion:
     txt = (body.title or "").lower()
 
-    if any(k in txt for k in ["kid", "baby", "trẻ em", "em bé", "đồ chơi", "toy", "hoạt hình", "mầm non"]):
+    # The under-18 range is three brackets now, so these split too: a nappy
+    # advert and a game-console advert used to get the same "<18" suggestion.
+    if any(k in txt for k in ["baby", "em bé", "sơ sinh", "tã", "bỉm", "sữa bột", "mầm non", "mẫu giáo"]):
         return TargetSuggestion(
             category="Đồ chơi & Trẻ em",
-            target_age_group="<18",
+            target_age_group="<6",
+            target_gender="all",
+            reason="Sản phẩm cho trẻ sơ sinh và tuổi mầm non",
+        )
+    if any(k in txt for k in ["kid", "trẻ em", "đồ chơi", "toy", "hoạt hình", "thiếu nhi", "tiểu học"]):
+        return TargetSuggestion(
+            category="Đồ chơi & Trẻ em",
+            target_age_group="6-13",
             target_gender="all",
             reason="Từ khóa sản phẩm dành cho thiếu nhi và phụ huynh có con nhỏ",
         )
     if any(k in txt for k in ["game", "gaming", "playstation", "nintendo", "anime", "manga", "học sinh"]):
         return TargetSuggestion(
             category="Công nghệ & Gaming",
-            target_age_group="<18",
+            target_age_group="13-18",
             target_gender="all",
             reason="Nội dung giải trí, game và văn hóa học sinh / thanh thiếu niên",
         )

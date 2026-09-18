@@ -37,7 +37,7 @@ def draw_person(frame_bgr: np.ndarray, meta) -> None:
 
     label_parts = [f"#{meta.track_id}"]
     if getattr(meta, "age", None) is not None and meta.age_group:
-        label_parts.append(f"~{round(meta.age)}y ({meta.age_group})")
+        label_parts.append(f"~{meta.age}y ({meta.age_group})")
     elif meta.age_group:
         label_parts.append(f"Age:{meta.age_group}")
     if meta.gender:

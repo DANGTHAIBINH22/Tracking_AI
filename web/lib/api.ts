@@ -101,7 +101,7 @@ export type AdRecommendation = {
   match_score: number;
   viewer_age_group: string | null;
   viewer_gender: string | null;
-  viewer_approx_age: number | null;
+  viewer_approx_age: number | null;   // whole years
   crowd_context?: string | null;
   people_count?: number;
   scene_weather?: string | null;
@@ -290,7 +290,7 @@ export type TrackingSessionPublic = {
   female_count: number;
   unknown_gender_count: number;
   age_breakdown: Record<string, number>;
-  avg_age: number | null;
+  avg_age: number | null;   // whole years
   avg_presence_seconds: number;
   impressions_per_minute: number;
   notes: string;
@@ -627,7 +627,9 @@ export const api = {
       }),
     }),
   captureStop: () => request<CaptureState>("/api/capture/stop", { method: "POST" }),
-  captureSources: () => request<{ value: string; label: string; type: string; description?: string }[]>("/api/capture/sources"),
+  // `group` is "" for the presets and the loose clips in data/, or a folder
+  // heading for a named set such as data/age_kids.
+  captureSources: () => request<{ value: string; label: string; type: string; group?: string; description?: string }[]>("/api/capture/sources"),
   uploadTestVideo: async (file: File): Promise<{ source: string; filename: string; message: string }> => {
     const fd = new FormData();
     fd.append("file", file);

@@ -25,7 +25,7 @@ from scene_vlm import SceneVLM
 class PersonMeta:
     track_id: int
     bbox: tuple[int, int, int, int]
-    age: float | None = None
+    age: int | None = None   # whole years; see AgeGender.age
     age_group: str | None = None
     gender: str | None = None
     yaw: float | None = None
@@ -50,7 +50,7 @@ class Pipeline:
         self.vlm = SceneVLM() if cfg.vlm_enabled else None  # Phase 6
         self._frame_idx = 0
         self._ag_samples: dict[int, list[AgeGender]] = {}   # track_id -> raw votes
-        self._age_cache: dict[int, tuple[float | None, str | None, str | None]] = {}    # track_id -> (age, age_group, gender)
+        self._age_cache: dict[int, tuple[int | None, str | None, str | None]] = {}    # track_id -> (age, age_group, gender)
         self._last_seen: dict[int, float] = {}
 
     def reset(self) -> None:
@@ -82,7 +82,7 @@ class Pipeline:
         from scene_vlm import SceneContext
         return SceneContext()
 
-    def _reduce_votes(self, samples: list[tuple[AgeGender, int]]) -> tuple[float | None, str | None, str | None]:
+    def _reduce_votes(self, samples: list[tuple[AgeGender, int]]) -> tuple[int | None, str | None, str | None]:
         """Collapse several noisy per-frame estimates into one answer.
 
         Gender by confidence-weighted vote over every sample; age by median over
@@ -98,7 +98,10 @@ class Pipeline:
         if not self.cfg.age_enabled:
             return None, None, gender
         usable = [ag.age for ag, px in samples if px >= self.cfg.min_face_px_for_age]
-        approx_age = round(float(np.median(usable)), 1) if usable else None
+        # int(): a median over an even number of whole-year votes lands on a
+        # half year, which would put a .5 back into a value the estimator
+        # deliberately rounded off.
+        approx_age = int(round(float(np.median(usable)))) if usable else None
         age_group = map_age_group(approx_age) if approx_age is not None else None
         return approx_age, age_group, gender
 
@@ -118,7 +121,7 @@ class Pipeline:
         x1, y1, x2, y2 = bbox
         return crop_face(source_frame, (int(x1 * sx), int(y1 * sy), int(x2 * sx), int(y2 * sy)))
 
-    def _age_gender_voted(self, track_id: int, face_bgr: np.ndarray) -> tuple[float | None, str | None, str | None]:
+    def _age_gender_voted(self, track_id: int, face_bgr: np.ndarray) -> tuple[int | None, str | None, str | None]:
         """Sample age/gender periodically until enough votes, then hold the result."""
         samples = self._ag_samples.setdefault(track_id, [])
         due = (
@@ -215,7 +218,7 @@ class Pipeline:
                 t.track_id, self._attribute_crop(frame_bgr, source_frame, t.bbox)
             )
             gender_vn = "Nam" if gender == "M" else ("Nữ" if gender == "F" else "Chưa rõ")
-            age_str = f"~{round(approx_age)} ({age_group})" if approx_age is not None else (age_group or "Chưa rõ")
+            age_str = f"~{approx_age} ({age_group})" if approx_age is not None else (age_group or "Chưa rõ")
             if verbose:
                 print(f"      - Bước 3.3: Phân tích giới tính/tuổi: {gender_vn} ({age_str})")
 

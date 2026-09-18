@@ -82,10 +82,52 @@ def stop() -> dict:
     return state()
 
 
+_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+
+# A subfolder of data/ is a named set of clips rather than a stray upload, so it
+# gets a heading in the picker instead of 35 unlabelled buttons in one row.
+_FOLDER_LABELS = {"age_kids": "Trẻ em & thiếu niên (kiểm tra ước lượng tuổi)"}
+
+# The child/teen set is named by subject prefix — see eval/age_kids/manifest.tsv
+# — so a label can say which age band a clip exercises instead of echoing the
+# filename. Longest prefix first: "children_" must win over "child_".
+_CLIP_PREFIXES = (
+    ("children_", "🧒", "Nhiều trẻ em"),
+    ("child_", "🧒", "Trẻ em ~2-13"),
+    ("baby_", "👶", "Trẻ sơ sinh 0-2"),
+    ("teen_", "🧑", "Thiếu niên ~13-25"),
+    ("mixed_", "👨‍👧", "Trẻ em + người lớn"),
+    ("farfield_", "🔭", "Mặt ở xa (~35-50px)"),
+)
+
+
+def _clip_label(stem: str, filename: str) -> str:
+    lowered = stem.lower()
+    for prefix, emoji, what in _CLIP_PREFIXES:
+        if lowered.startswith(prefix):
+            # Drop the prefix and the trailing mixkit id: "child_girl_legos-42196"
+            # reads better as "girl legos".
+            rest = stem[len(prefix):].rsplit("-", 1)[0].replace("_", " ")
+            return f"{emoji} {what}: {rest}"
+    if "store" in lowered or "aisle" in lowered:
+        return f"🛒 Video mẫu: TTTM / Siêu thị ({filename})"
+    if "walking" in lowered:
+        return f"🚶 Video mẫu: Người đi lại ({filename})"
+    if "pose" in lowered:
+        return f"👤 Video mẫu: Hướng nhìn khuôn mặt ({filename})"
+    return f"🎬 Video test: {stem.replace('-', ' ').replace('_', ' ').title()} ({filename})"
+
+
 @router.get("/sources")
 def list_available_sources() -> list[dict]:
-    """List preset hardware and all test video files in data/ directory."""
-    import os
+    """Preset hardware plus every test video under data/, one subfolder deep.
+
+    Recursing was not optional once the clips stopped being a flat handful:
+    `data/age_kids/` holds the child/teen set that eval/age_kids/fetch.sh pulls
+    down, and a top-level-only scan left all of it unreachable from /admin even
+    though the engine takes the path happily. Depth is capped at one level so a
+    stray folder of frames cannot flood the picker.
+    """
     from pathlib import Path
 
     results = [
@@ -93,37 +135,38 @@ def list_available_sources() -> list[dict]:
             "value": "0",
             "label": "📹 Webcam máy tính (cục bộ)",
             "type": "webcam",
+            "group": "",
             "description": "Camera gắn trực tiếp trên máy chạy server",
         },
         {
             "value": "browser",
             "label": "🌐 Webcam màn hình Kiosk (Browser)",
             "type": "browser",
+            "group": "",
             "description": "Camera từ trình duyệt mở trang /screen hoặc /homescreen",
         },
     ]
 
     data_dir = Path("data")
-    if data_dir.exists() and data_dir.is_dir():
-        video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
-        for f in sorted(data_dir.iterdir()):
-            if f.is_file() and f.suffix.lower() in video_exts:
-                name_clean = f.stem.replace("-", " ").replace("_", " ").title()
-                if "store" in f.stem.lower() or "aisle" in f.stem.lower():
-                    label = f"🛒 Video mẫu: TTTM / Siêu thị ({f.name})"
-                elif "walking" in f.stem.lower():
-                    label = f"🚶 Video mẫu: Người đi lại ({f.name})"
-                elif "pose" in f.stem.lower():
-                    label = f"👤 Video mẫu: Hướng nhìn khuôn mặt ({f.name})"
-                else:
-                    label = f"🎬 Video test: {name_clean} ({f.name})"
+    if not (data_dir.exists() and data_dir.is_dir()):
+        return results
 
-                results.append({
-                    "value": f"data/{f.name}",
-                    "label": label,
-                    "type": "file",
-                    "description": f"Video giả lập luồng camera từ file {f.name}",
-                })
+    def add_clips(folder: Path, group: str) -> None:
+        for f in sorted(folder.iterdir()):
+            if not (f.is_file() and f.suffix.lower() in _VIDEO_EXTS):
+                continue
+            rel = f.relative_to(data_dir).as_posix()
+            results.append({
+                "value": f"data/{rel}",
+                "label": _clip_label(f.stem, f.name),
+                "type": "file",
+                "group": group,
+                "description": f"Video giả lập luồng camera từ file {rel}",
+            })
+
+    add_clips(data_dir, "")
+    for sub in sorted(p for p in data_dir.iterdir() if p.is_dir() and not p.name.startswith(".")):
+        add_clips(sub, _FOLDER_LABELS.get(sub.name, sub.name))
 
     return results
 

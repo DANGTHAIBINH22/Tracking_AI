@@ -29,7 +29,7 @@ from configs import CFG
 from pipeline import Pipeline, PersonMeta
 from preprocess import preprocess
 from server import db
-from server.audience import AGE_GROUPS, normalize_age_group
+from server.audience import AGE_GROUPS, normalize_age_group, target_covers
 from server.player import PlaylistPlayer
 from server.settings import SETTINGS
 from server.sources import BROWSER_SOURCE, BrowserSource, LocalCameraSource, is_browser_source
@@ -182,7 +182,7 @@ class AnalyticsEngine:
         genders = {"Nam": 0, "Nữ": 0, "unknown": 0}
         ages = {group: 0 for group in AGE_GROUPS}
         ages["unknown"] = 0
-        age_values: list[float] = []
+        age_values: list[int] = []
         dwell_total = 0.0
         presence_total = 0.0
 
@@ -192,7 +192,7 @@ class AnalyticsEngine:
             genders[gender] = genders.get(gender, 0) + 1
             ages[group] = ages.get(group, 0) + 1
             if t["age"] is not None:
-                age_values.append(float(t["age"]))
+                age_values.append(int(t["age"]))
             dwell_total += float(t["dwell_seconds"])
             presence_total += float(t["presence_seconds"])
 
@@ -202,7 +202,10 @@ class AnalyticsEngine:
             "ages": ages,
             "unique_tracks": len(tracks),
             "attentive_tracks": len(self._session_attentive_tracks),
-            "avg_age": round(sum(age_values) / len(age_values), 1) if age_values else None,
+            # Whole years, like the per-person ages it averages: a mean of
+            # values the estimator rounded off cannot be more precise than
+            # they are.
+            "avg_age": round(sum(age_values) / len(age_values)) if age_values else None,
             "avg_presence_seconds": round(presence_total / n, 2),
             "total_dwell_seconds": round(dwell_total, 2),
             # The API reads this to tell a per-person row apart from a legacy
@@ -292,8 +295,8 @@ class AnalyticsEngine:
         candidates = attentive if attentive else metas
         priority_viewer = max(candidates, key=lambda m: getattr(m, "dwell_time", 0.0))
 
-        # Translate the pipeline's bin label ("0-18", "55+") into the spelling
-        # an advert's target is stored in ("<18", ">55"). Comparing them raw
+        # Translate the pipeline's bin label ("0-6", "55+") into the spelling
+        # an advert's target is stored in ("<6", ">55"). Comparing them raw
         # inverted the score at both ends: an advert aimed at children was
         # penalised whenever a child was the one watching.
         v_age_grp = normalize_age_group(priority_viewer.age_group)
@@ -342,7 +345,10 @@ class AnalyticsEngine:
 
             # Age score
             if v_age_grp:
-                if tag_age == v_age_grp:
+                # target_covers, not ==: an advert saved before `<18` was split
+                # into `<6` / `6-13` / `13-18` still targets all three, and an
+                # equality test would penalise it in front of its own audience.
+                if target_covers(tag_age, v_age_grp):
                     score += 30.0
                 elif tag_age == "all":
                     score += 10.0
@@ -395,7 +401,7 @@ class AnalyticsEngine:
             return None
 
         g_str = "Nam" if v_gender == "M" else "Nữ" if v_gender == "F" else "Khán giả"
-        age_str = f"~{round(v_age)} tuổi" if v_age is not None else (v_age_grp or "")
+        age_str = f"~{v_age} tuổi" if v_age is not None else (v_age_grp or "")
         att_str = "đang chú ý nhìn màn hình" if priority_viewer.attention else "đang đứng trước màn hình"
         cat_str = best_c.get("category") or "Sản phẩm"
         target_crowd_display = (
@@ -423,7 +429,7 @@ class AnalyticsEngine:
             "match_score": round(best_score, 1),
             "viewer_age_group": v_age_grp,
             "viewer_gender": v_gender,
-            "viewer_approx_age": round(v_age, 1) if v_age is not None else None,
+            "viewer_approx_age": v_age,
             "crowd_context": crowd_context,
             "people_count": people_count,
             "scene_weather": scene_weather,
@@ -451,8 +457,13 @@ class AnalyticsEngine:
                     {
                         "track_id": m.track_id,
                         "bbox": tuple(m.bbox),
-                        "age": None if getattr(m, "age", None) is None else round(m.age, 1),
-                        "age_group": m.age_group,
+                        "age": getattr(m, "age", None),
+                        # Normalised like every other age_group leaving this
+                        # module. Raw, the live table showed the pipeline's
+                        # spelling ("0-6", "55+") while the session ledger and
+                        # the reports beside it showed the app's ("<6", ">55") —
+                        # the same viewer under two names on one screen.
+                        "age_group": normalize_age_group(m.age_group) or m.age_group,
                         "gender": m.gender,
                         "yaw": None if m.yaw is None else round(m.yaw, 1),
                         "pitch": None if m.pitch is None else round(m.pitch, 1),
@@ -569,7 +580,7 @@ class AnalyticsEngine:
             if m.gender:
                 entry["gender"] = "Nam" if m.gender.lower() in ("nam", "male", "m") else "Nữ"
             if m.age is not None:
-                entry["age"] = round(float(m.age), 1)
+                entry["age"] = int(m.age)
             if m.age_group:
                 entry["age_group"] = normalize_age_group(m.age_group) or m.age_group
 
