@@ -201,7 +201,7 @@ export default function AnalyticsDashboard() {
   }, [summary?.creatives, searchQuery, selectedKind, sortBy]);
 
   return (
-    <main className="mx-auto max-w-7xl space-y-6 px-4 py-5 sm:px-6 sm:py-6">
+    <main className="mx-auto max-w-7xl space-y-6 px-4 py-5 sm:px-6 sm:py-6" suppressHydrationWarning>
       {/* ========================================================= */}
       {/* HEADER: EXECUTIVE CONTEXT & ACTIONS                       */}
       {/* ========================================================= */}
@@ -363,7 +363,7 @@ export default function AnalyticsDashboard() {
           <h2 className="text-xs font-bold uppercase tracking-wider text-slate-500">
             Chỉ Số Hiệu Suất Chiến Dịch Cốt Lõi (Key Performance Indicators)
           </h2>
-          <span className="text-[11px] text-slate-400">
+          <span className="text-[11px] text-slate-400" suppressHydrationWarning>
             {summary?.generated_at ? `Cập nhật lúc: ${clock(summary.generated_at)} · ${formatDate(summary.generated_at)}` : ""}
           </span>
         </div>
@@ -737,7 +737,7 @@ export default function AnalyticsDashboard() {
             <tbody className="divide-y divide-slate-100">
               {timeline.map((row) => (
                 <tr key={row.airing_id} className="hover:bg-slate-50/80 transition">
-                  <td className="tabular px-4 py-2 font-mono text-slate-500">
+                  <td className="tabular px-4 py-2 font-mono text-slate-500" suppressHydrationWarning>
                     {clock(row.started_at)}
                   </td>
                   <td className="px-4 py-2 font-medium text-slate-900">

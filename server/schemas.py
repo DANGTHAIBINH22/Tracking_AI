@@ -73,6 +73,9 @@ class Creative(BaseModel):
     target_gender: str = "all"
     target_crowd: str = "all"        # "all" | "single" | "group" | "crowd"
     target_weather: str = "all"      # "all" | "sunny" | "cloudy" | "rainy"
+    target_pet: str = "all"          # "all" | "none" | "yes" | "dog" | "cat"
+    target_clothing: str = "all"     # "all" | color name (e.g. "Black", "Red")
+    target_style: str = "all"        # "all" | "Formal" | "Sport" | "Casual"
     category: str = "Chung"
     description: str = ""
 
@@ -85,6 +88,9 @@ class CreativeUpdate(BaseModel):
     target_gender: str | None = None
     target_crowd: str | None = None
     target_weather: str | None = None
+    target_pet: str | None = None
+    target_clothing: str | None = None
+    target_style: str | None = None
     category: str | None = None
     description: str | None = None
 
@@ -95,6 +101,7 @@ class CreativeUpdate(BaseModel):
     @classmethod
     def _canonical_age(cls, value: str | None) -> str | None:
         return None if value is None else normalize_target_age(value)
+
 
 
 class TargetSuggestion(BaseModel):
@@ -128,7 +135,15 @@ class AdRecommendation(BaseModel):
     viewer_approx_age: float | None = None
     crowd_context: str | None = None   # "single" | "group" | "crowd"
     people_count: int = 0
+    scene_weather: str | None = None
+    scene_objects: list[str] = []
+    has_pet: bool = False
+    pet_type: str | None = None        # "dog" | "cat"
+    scene_pets: list[str] = []
+    clothing_color: str | None = None
+    clothing_style: str | None = None
     reason: str = ""
+
 
 
 class PlaylistOrder(BaseModel):
@@ -205,6 +220,17 @@ class PlaylistItemOrder(BaseModel):
     item_ids: list[int]
 
 
+class AdDecisionLog(BaseModel):
+    timestamp: str
+    creative_id: int
+    creative_name: str
+    duration: float = 10.0
+    mode: str = "rotation"  # "smart_targeting" | "rotation" | "manual"
+    match_score: float | None = None
+    audience_summary: str | None = None
+    reason: str | None = None
+
+
 class NowPlaying(BaseModel):
     airing_id: int | None = None
     creative: Creative | None = None
@@ -212,6 +238,7 @@ class NowPlaying(BaseModel):
     elapsed: float = 0.0
     remaining: float = 0.0
     playing: bool = False
+    ad_logs: list[AdDecisionLog] = []
 
 
 class LiveTrack(BaseModel):
@@ -224,6 +251,11 @@ class LiveTrack(BaseModel):
     pitch: float | None = None
     attention: int = 0
     dwell_time: float = 0.0
+    has_pet: bool = False
+    pet_type: str | None = None        # "dog" | "cat"
+    clothing_color: str | None = None  # e.g. "Black", "Red", "Blue"
+    clothing_style: str | None = None  # "Formal" | "Sport" | "Casual"
+
 
 
 class LiveStats(BaseModel):

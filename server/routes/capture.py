@@ -103,33 +103,33 @@ def list_available_sources() -> list[dict]:
         },
     ]
 
-    data_dir = Path("data")
-    if data_dir.exists() and data_dir.is_dir():
-        video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
-        for f in sorted(data_dir.iterdir()):
-            if f.is_file() and f.suffix.lower() in video_exts:
-                name_clean = f.stem.replace("-", " ").replace("_", " ").title()
-                if "store" in f.stem.lower() or "aisle" in f.stem.lower():
-                    label = f"🛒 Video mẫu: TTTM / Siêu thị ({f.name})"
-                elif "walking" in f.stem.lower():
-                    label = f"🚶 Video mẫu: Người đi lại ({f.name})"
-                elif "pose" in f.stem.lower():
-                    label = f"👤 Video mẫu: Hướng nhìn khuôn mặt ({f.name})"
-                else:
-                    label = f"🎬 Video test: {name_clean} ({f.name})"
+    video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+    for folder in [Path("inputs"), Path("data")]:
+        if folder.exists() and folder.is_dir():
+            for f in sorted(folder.iterdir()):
+                if f.is_file() and f.suffix.lower() in video_exts:
+                    name_clean = f.stem.replace("-", " ").replace("_", " ").title()
+                    if "store" in f.stem.lower() or "aisle" in f.stem.lower():
+                        label = f"🛒 Video mẫu: TTTM / Siêu thị ({f.name})"
+                    elif "walking" in f.stem.lower():
+                        label = f"🚶 Video mẫu: Người đi lại ({f.name})"
+                    elif "pose" in f.stem.lower():
+                        label = f"👤 Video mẫu: Hướng nhìn khuôn mặt ({f.name})"
+                    else:
+                        label = f"🎬 Video test: {name_clean} ({f.name})"
 
-                results.append({
-                    "value": f"data/{f.name}",
-                    "label": label,
-                    "type": "file",
-                    "description": f"Video giả lập luồng camera từ file {f.name}",
-                })
+                    results.append({
+                        "value": f"{folder.name}/{f.name}",
+                        "label": label,
+                        "type": "file",
+                        "description": f"Video giả lập luồng camera từ file {folder.name}/{f.name}",
+                    })
 
     return results
 
 
 @router.post("/upload-test-video")
-async def upload_test_video(file: UploadFile = File(...)) -> dict:
+def upload_test_video(file: UploadFile = File(...)) -> dict:
     """Upload a test video file (e.g. mall footage) into data/ for AI testing."""
     import shutil
     import uuid

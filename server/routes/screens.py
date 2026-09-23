@@ -27,8 +27,8 @@ CODE_LIFETIME = 15 * 60  # 15 minutes
 
 
 def _generate_code() -> str:
-    part1 = "".join(random.choices(CODE_CHARS, k=3))
-    part2 = "".join(random.choices(CODE_CHARS, k=3))
+    part1 = "".join(secrets.choice(CODE_CHARS) for _ in range(3))
+    part2 = "".join(secrets.choice(CODE_CHARS) for _ in range(3))
     return f"{part1}-{part2}"
 
 

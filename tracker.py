@@ -54,9 +54,9 @@ class FaceTracker:
         if len(results) > 0 and results[0].boxes is not None:
             boxes = results[0].boxes
             if boxes.id is not None:
-                ids = boxes.id.cpu().numpy().astype(int)
-                xyxy = boxes.xyxy.cpu().numpy()
-                confs = boxes.conf.cpu().numpy()
+                ids = boxes.id.int().cpu().numpy()
+                xyxy = boxes.xyxy.float().cpu().numpy()
+                confs = boxes.conf.float().cpu().numpy()
                 for track_id, box, conf in zip(ids, xyxy, confs):
                     x1, y1, x2, y2 = map(int, box)
                     tracks.append(Track(track_id=int(track_id), bbox=(x1, y1, x2, y2), confidence=float(conf)))

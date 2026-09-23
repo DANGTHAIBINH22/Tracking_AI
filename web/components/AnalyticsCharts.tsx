@@ -17,6 +17,14 @@ import {
   YAxis,
 } from "recharts";
 
+function useMounted() {
+  const [mounted, setMounted] = React.useState(false);
+  React.useEffect(() => {
+    setMounted(true);
+  }, []);
+  return mounted;
+}
+
 // -------------------------------------------------------------
 // 1. GENDER DONUT CHART
 // -------------------------------------------------------------
@@ -29,12 +37,17 @@ export function GenderDonutChart({
   female: number;
   other?: number;
 }) {
+  const mounted = useMounted();
   const total = male + female + other;
   const data = [
     { name: "Nam giới", value: male, color: "#3b82f6" },
     { name: "Nữ giới", value: female, color: "#ec4899" },
     ...(other > 0 ? [{ name: "Khác", value: other, color: "#94a3b8" }] : []),
   ];
+
+  if (!mounted) {
+    return <div className="h-56 w-full animate-pulse bg-slate-50/50 rounded-xl" />;
+  }
 
   if (!total) {
     return (
@@ -103,6 +116,7 @@ export function AgeDistributionBarChart({
 }: {
   data: Record<string, number>;
 }) {
+  const mounted = useMounted();
   const chartData = [
     { group: "<18", label: "Dưới 18", count: data["<18"] || 0 },
     { group: "18-35", label: "18 - 35", count: (data["18-35"] || 0) + (data["18-24"] || 0) + (data["25-34"] || 0) },
@@ -111,6 +125,10 @@ export function AgeDistributionBarChart({
   ];
 
   const total = chartData.reduce((sum, item) => sum + item.count, 0);
+
+  if (!mounted) {
+    return <div className="h-56 w-full animate-pulse bg-slate-50/50 rounded-xl" />;
+  }
 
   if (!total) {
     return (
@@ -177,12 +195,17 @@ export function CreativePerformanceChart({
     attention_rate: number;
   }[];
 }) {
+  const mounted = useMounted();
   const chartData = creatives.slice(0, 6).map((c) => ({
     name: c.name.length > 15 ? `${c.name.slice(0, 14)}…` : c.name,
     reach: c.reach,
     impressions: c.impressions,
     rate: Math.round(c.attention_rate * 100),
   }));
+
+  if (!mounted) {
+    return <div className="h-64 w-full animate-pulse bg-slate-50/50 rounded-xl" />;
+  }
 
   if (!chartData.length) {
     return (
@@ -253,6 +276,7 @@ export function AiringTrendAreaChart({
     total_attention_seconds: number;
   }[];
 }) {
+  const mounted = useMounted();
   const chartData = [...timeline]
     .reverse()
     .slice(-15)
@@ -270,6 +294,10 @@ export function AiringTrendAreaChart({
         attentionSeconds: Math.round(row.total_attention_seconds),
       };
     });
+
+  if (!mounted) {
+    return <div className="h-60 w-full animate-pulse bg-slate-50/50 rounded-xl" />;
+  }
 
   if (!chartData.length) {
     return (

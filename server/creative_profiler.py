@@ -59,7 +59,7 @@ CATEGORIES = (
 
 MAX_FRAMES = 12
 VLM_FRAMES = 3
-VLM_MODEL = "claude-sonnet-5"
+VLM_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
 
 
 age_to_group = audience.age_to_group

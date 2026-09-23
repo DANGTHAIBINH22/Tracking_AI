@@ -8,6 +8,7 @@ import {
   CaptureConfig,
   CaptureState,
   ScreenPublic,
+  TargetingSettings,
   Thresholds,
   TrackingSessionPublic,
   UserPublic,
@@ -49,6 +50,7 @@ export default function AdminPage() {
   const [mode, setMode] = useState<"server" | "browser">("server");
   const [source, setSource] = useState("0");
   const [sourcesList, setSourcesList] = useState<{ value: string; label: string; type: string; description?: string }[]>([]);
+  const [streamKey, setStreamKey] = useState<number>(() => Date.now());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState(false);
@@ -62,8 +64,12 @@ export default function AdminPage() {
   const [pairError, setPairError] = useState<string | null>(null);
   const [pairSuccess, setPairSuccess] = useState<string | null>(null);
 
-  // Smart targeting state
+  // Smart targeting & Dynamic Cut-in settings
   const [smartTargeting, setSmartTargeting] = useState<boolean>(false);
+  const [cutInEnabled, setCutInEnabled] = useState<boolean>(true);
+  const [cutInMinPlayback, setCutInMinPlayback] = useState<number>(3.0);
+  const [lookaheadSeconds, setLookaheadSeconds] = useState<number>(3.0);
+  const [showTargetingConfig, setShowTargetingConfig] = useState<boolean>(false);
 
   // Selected device for tracking detail view
   const [selectedScreenId, setSelectedScreenId] = useState<number | string | null>(null);
@@ -229,30 +235,54 @@ export default function AdminPage() {
           if (!ignore) setError((err as Error).message);
         });
       loadScreens();
+      loadSources();
     };
 
     fetchState();
+    loadSources();
     api.captureConfig().then((cfg) => { if (!ignore) setConfig(cfg); }).catch(() => undefined);
     api.thresholds().then((th) => { if (!ignore) setThresholds(th); }).catch(() => undefined);
     api.health().then((h) => { if (!ignore) setHealth(h); }).catch(() => undefined);
-    api.getSmartTargeting().then((st) => { if (!ignore) setSmartTargeting(st.enabled); }).catch(() => undefined);
+    api.getTargetingSettings().then((st) => {
+      if (!ignore) {
+        setSmartTargeting(st.smart_targeting);
+        setCutInEnabled(st.cut_in_enabled);
+        setCutInMinPlayback(st.cut_in_min_playback);
+        setLookaheadSeconds(st.lookahead_seconds);
+      }
+    }).catch(() => undefined);
 
     const id = setInterval(fetchState, 3000);
     return () => {
       ignore = true;
       clearInterval(id);
     };
-  }, [isAuthenticated, loadScreens]);
+  }, [isAuthenticated, loadScreens, loadSources]);
 
   const isSmartTargeting = stats?.smart_targeting !== undefined ? stats.smart_targeting : smartTargeting;
+  const isCutInEnabled = stats?.now_playing?.cut_in_enabled !== undefined ? stats.now_playing.cut_in_enabled : cutInEnabled;
+  const currentMinPlayback = stats?.now_playing?.cut_in_min_playback !== undefined ? stats.now_playing.cut_in_min_playback : cutInMinPlayback;
+  const currentLookahead = stats?.now_playing?.lookahead_seconds !== undefined ? stats.now_playing.lookahead_seconds : lookaheadSeconds;
 
   const handleToggleSmartTargeting = async () => {
     try {
       const nextVal = !isSmartTargeting;
       setSmartTargeting(nextVal);
-      await api.setSmartTargeting(nextVal);
+      await api.setTargetingSettings({ smart_targeting: nextVal });
     } catch (e) {
       console.error("Lỗi đổi chế độ phát thông minh:", e);
+    }
+  };
+
+  const handleUpdateTargeting = async (patch: Partial<TargetingSettings>) => {
+    try {
+      const res = await api.setTargetingSettings(patch);
+      setSmartTargeting(res.smart_targeting);
+      setCutInEnabled(res.cut_in_enabled);
+      setCutInMinPlayback(res.cut_in_min_playback);
+      setLookaheadSeconds(res.lookahead_seconds);
+    } catch (e) {
+      console.error("Lỗi cập nhật cấu hình targeting:", e);
     }
   };
 
@@ -332,6 +362,7 @@ export default function AdminPage() {
       const res = await api.uploadTestVideo(file);
       setSource(res.source);
       setMode("server");
+      setStreamKey(Date.now());
       await loadSources();
       alert(`Đã tải lên video: ${res.filename}. Bạn có thể bấm "▶ Bật phân tích" để chạy AI test ngay!`);
     } catch (err) {
@@ -358,11 +389,34 @@ export default function AdminPage() {
   const nowPlaying = stats?.now_playing ?? null;
   const browserMode = running && capture?.mode === "browser";
 
+  const handleSelectSource = (newSource: string, newMode: "server" | "browser" = "server") => {
+    setSource(newSource);
+    setMode(newMode);
+    setStreamKey(Date.now());
+    if (running) {
+      act(async () => {
+        const devId = selectedScreenId !== null ? selectedScreenId : "host";
+        const scrId = typeof selectedScreenId === "number" ? selectedScreenId : undefined;
+        await api.captureStop().catch(() => {});
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        const res = await api.captureStart(newMode === "browser" ? BROWSER_SOURCE : newSource || "0", devId, scrId);
+        setStreamKey(Date.now());
+        setTimeout(() => loadDeviceSessions(selectedScreenId), 1200);
+        return res;
+      });
+    }
+  };
+
   const startCapture = () =>
     act(async () => {
+      setStreamKey(Date.now());
       const devId = selectedScreenId !== null ? selectedScreenId : "host";
       const scrId = typeof selectedScreenId === "number" ? selectedScreenId : undefined;
       const res = await api.captureStart(mode === "browser" ? BROWSER_SOURCE : source || "0", devId, scrId);
+      if (!playing) {
+        api.playerStart().catch(() => {});
+      }
+      setStreamKey(Date.now());
       setTimeout(() => loadDeviceSessions(selectedScreenId), 1200);
       return res;
     });
@@ -370,6 +424,7 @@ export default function AdminPage() {
   const stopCapture = () =>
     act(async () => {
       const res = await api.captureStop();
+      setStreamKey(Date.now());
       setTimeout(() => loadDeviceSessions(selectedScreenId), 800);
       return res;
     });
@@ -476,6 +531,10 @@ export default function AdminPage() {
       "Giới tính",
       "Tuổi",
       "Nhóm tuổi",
+      "Thú cưng",
+      "Loại thú cưng",
+      "Màu trang phục",
+      "Phong cách",
     ];
     const fmt = (ts: number) => (ts ? new Date(ts * 1000).toLocaleString("vi-VN") : "");
     const rows = s.tracks.map((t) => [
@@ -491,6 +550,10 @@ export default function AdminPage() {
       t.gender ?? "Không xác định",
       t.age ?? "",
       t.age_group ?? "Không xác định",
+      t.has_pet ? "Có" : "Không",
+      t.pet_type ?? "",
+      t.clothing_color ?? "",
+      t.clothing_style ?? "",
     ]);
     downloadCSV(`session_${s.session_code}_tracks.csv`, headers, rows);
   };
@@ -1218,7 +1281,8 @@ export default function AdminPage() {
                     {running ? (
                       // eslint-disable-next-line @next/next/no-img-element
                       <img
-                        src={`${API_BASE}/api/capture/stream.mjpg`}
+                        key={`${source}-${streamKey}`}
+                        src={`${API_BASE}/api/capture/stream.mjpg?t=${streamKey}`}
                         alt="Camera khán giả"
                         className="h-full w-full object-contain"
                       />
@@ -1267,13 +1331,13 @@ export default function AdminPage() {
                   <div className="grid gap-2 sm:grid-cols-2">
                     <ModeCard
                       active={mode === "browser"}
-                      onClick={() => setMode("browser")}
+                      onClick={() => handleSelectSource("browser", "browser")}
                       title="Trình duyệt / Màn hình Kiosk (/screen)"
                       body="Màn hình TV/Kiosk tự mở webcam và gửi khung hình qua WebSocket."
                     />
                     <ModeCard
                       active={mode === "server"}
-                      onClick={() => setMode("server")}
+                      onClick={() => handleSelectSource(source === "browser" ? "0" : source, "server")}
                       title="Máy chủ (OpenCV / Video TTTM)"
                       body="Máy chủ tự đọc webcam cắm trực tiếp hoặc phát lặp video mô phỏng TTTM."
                     />
@@ -1302,10 +1366,7 @@ export default function AdminPage() {
                             <button
                               key={s.value}
                               type="button"
-                              onClick={() => {
-                                setSource(s.value);
-                                setMode("server");
-                              }}
+                              onClick={() => handleSelectSource(s.value, "server")}
                               className={`rounded-lg border px-2.5 py-1 text-xs transition ${
                                 source === s.value
                                   ? "border-emerald-600 bg-emerald-50 font-semibold text-emerald-800 shadow-xs"
@@ -1319,45 +1380,47 @@ export default function AdminPage() {
                           <>
                             <button
                               type="button"
-                              onClick={() => {
-                                setSource("0");
-                                setMode("server");
-                              }}
+                              onClick={() => handleSelectSource("0", "server")}
                               className={`rounded-lg border px-2.5 py-1 text-xs transition ${
                                 source === "0"
                                   ? "border-emerald-600 bg-emerald-50 font-semibold text-emerald-800"
                                   : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
                               }`}
                             >
-                              Webcam máy tính (Index 0)
+                              📹 Webcam máy tính (Index 0)
                             </button>
                             <button
                               type="button"
-                              onClick={() => {
-                                setSource("data/store-aisle-detection.mp4");
-                                setMode("server");
-                              }}
+                              onClick={() => handleSelectSource("browser", "browser")}
                               className={`rounded-lg border px-2.5 py-1 text-xs transition ${
-                                source === "data/store-aisle-detection.mp4"
+                                source === "browser"
                                   ? "border-emerald-600 bg-emerald-50 font-semibold text-emerald-800"
                                   : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
                               }`}
                             >
-                              Video TTTM 1: Lối đi siêu thị
+                              🌐 Webcam Kiosk (Browser)
                             </button>
                             <button
                               type="button"
-                              onClick={() => {
-                                setSource("data/face-demographics-walking-and-pause.mp4");
-                                setMode("server");
-                              }}
+                              onClick={() => handleSelectSource("inputs/video1.mp4", "server")}
                               className={`rounded-lg border px-2.5 py-1 text-xs transition ${
-                                source === "data/face-demographics-walking-and-pause.mp4"
+                                source === "inputs/video1.mp4"
                                   ? "border-emerald-600 bg-emerald-50 font-semibold text-emerald-800"
                                   : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
                               }`}
                             >
-                              Video TTTM 2: Đi bộ & Dừng lại nhìn
+                              🎬 Video test 1 (video1.mp4)
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleSelectSource("inputs/video2.mp4", "server")}
+                              className={`rounded-lg border px-2.5 py-1 text-xs transition ${
+                                source === "inputs/video2.mp4"
+                                  ? "border-emerald-600 bg-emerald-50 font-semibold text-emerald-800"
+                                  : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
+                              }`}
+                            >
+                              🎬 Video test 2 (video2.mp4)
                             </button>
                           </>
                         )}
@@ -1383,12 +1446,14 @@ export default function AdminPage() {
                   </div>
 
                   <div className="max-h-60 overflow-x-auto overflow-y-auto">
-                    <table className="w-full min-w-[500px] text-xs">
+                    <table className="w-full min-w-[650px] text-xs">
                       <thead className="sticky top-0 bg-slate-100 text-slate-600 font-semibold border-b border-slate-200">
                         <tr>
                           <th className="px-3 py-2 text-left font-medium">Track ID</th>
                           <th className="px-3 py-2 text-left font-medium">Giới tính</th>
                           <th className="px-3 py-2 text-left font-medium">Độ tuổi ước tính</th>
+                          <th className="px-3 py-2 text-left font-medium">Trang phục & Phong cách</th>
+                          <th className="px-3 py-2 text-center font-medium">Thú cưng</th>
                           <th className="px-3 py-2 text-right font-medium">Góc đầu (Yaw/Pitch)</th>
                           <th className="px-3 py-2 text-right font-medium">Trạng thái</th>
                           <th className="px-3 py-2 text-right font-medium">Dwell Time</th>
@@ -1411,6 +1476,52 @@ export default function AdminPage() {
                                 t.age_group ?? "—"
                               )}
                             </td>
+                            <td className="px-3 py-2">
+                              {t.clothing_color ? (
+                                <div className="flex flex-col gap-0.5">
+                                  <span className="inline-flex items-center gap-1.5 font-medium text-slate-800">
+                                    <span
+                                      className="inline-block h-2.5 w-2.5 rounded-full border border-slate-300 shadow-2xs"
+                                      style={{
+                                        backgroundColor:
+                                          t.clothing_color.toLowerCase() === "white" ? "#ffffff" :
+                                          t.clothing_color.toLowerCase() === "black" ? "#1e293b" :
+                                          t.clothing_color.toLowerCase() === "red" ? "#ef4444" :
+                                          t.clothing_color.toLowerCase() === "blue" ? "#3b82f6" :
+                                          t.clothing_color.toLowerCase() === "green" ? "#22c55e" :
+                                          t.clothing_color.toLowerCase() === "yellow" ? "#eab308" :
+                                          t.clothing_color.toLowerCase() === "gray" ? "#94a3b8" :
+                                          t.clothing_color.toLowerCase() === "orange" ? "#f97316" :
+                                          t.clothing_color.toLowerCase() === "purple" ? "#a855f7" :
+                                          t.clothing_color.toLowerCase() === "pink" ? "#ec4899" :
+                                          t.clothing_color.toLowerCase() === "brown" ? "#78350f" : "#94a3b8",
+                                      }}
+                                    />
+                                    Áo {t.clothing_color}
+                                  </span>
+                                  {t.clothing_style && (
+                                    <span className="text-[10px] text-slate-500 font-medium capitalize">
+                                      Style: {t.clothing_style}
+                                    </span>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-slate-400">—</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2 text-center">
+                              {t.has_pet ? (
+                                <span className="inline-flex items-center gap-1 rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-800">
+                                  {t.pet_type?.toLowerCase() === "dog"
+                                    ? "🐕 Chó"
+                                    : t.pet_type?.toLowerCase() === "cat"
+                                    ? "🐈 Mèo"
+                                    : `🐾 ${t.pet_type || "Thú cưng"}`}
+                                </span>
+                              ) : (
+                                <span className="text-slate-400">—</span>
+                              )}
+                            </td>
                             <td className="tabular px-3 py-2 text-right font-mono text-slate-500">
                               {t.yaw ?? "—"}° / {t.pitch ?? "—"}°
                             </td>
@@ -1430,7 +1541,7 @@ export default function AdminPage() {
                         ))}
                         {!stats?.tracks?.length && (
                           <tr>
-                            <td colSpan={6} className="px-3 py-8 text-center text-slate-400">
+                            <td colSpan={8} className="px-3 py-8 text-center text-slate-400">
                               {running ? "Chưa có ai trong khung hình camera" : "Bật camera để bắt đầu theo dõi khuôn mặt"}
                             </td>
                           </tr>
@@ -1458,24 +1569,111 @@ export default function AdminPage() {
                       </div>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={handleToggleSmartTargeting}
-                      className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium transition ${
-                        isSmartTargeting
-                          ? "border border-purple-300 bg-purple-50 text-purple-700 font-semibold shadow-xs"
-                          : "border border-slate-200 bg-slate-100 text-slate-600 hover:text-slate-900"
-                      }`}
-                      title="Bật tính năng này để màn hình tự động ưu tiên phát quảng cáo phù hợp với khán giả đang nhìn"
-                    >
-                      <span
-                        className={`h-1.5 w-1.5 rounded-full ${
-                          isSmartTargeting ? "animate-pulse bg-purple-600" : "bg-slate-400"
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setShowTargetingConfig(!showTargetingConfig)}
+                        className={`rounded-full px-2 py-1 text-[11px] font-medium transition border flex items-center gap-1 ${
+                          showTargetingConfig
+                            ? "bg-purple-100 border-purple-300 text-purple-800 font-semibold"
+                            : "bg-white border-slate-200 text-slate-600 hover:bg-slate-50"
                         }`}
-                      />
-                      {isSmartTargeting ? "Phát thích ứng: BẬT" : "Phát thích ứng: TẮT"}
-                    </button>
+                        title="Cài đặt cơ chế cắt ngang và thời gian tính trước"
+                      >
+                        <span>⚙️ Cài đặt</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={handleToggleSmartTargeting}
+                        className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium transition ${
+                          isSmartTargeting
+                            ? "border border-purple-300 bg-purple-50 text-purple-700 font-semibold shadow-xs"
+                            : "border border-slate-200 bg-slate-100 text-slate-600 hover:text-slate-900"
+                        }`}
+                        title="Bật tính năng này để màn hình tự động ưu tiên phát quảng cáo phù hợp với khán giả đang nhìn"
+                      >
+                        <span
+                          className={`h-1.5 w-1.5 rounded-full ${
+                            isSmartTargeting ? "animate-pulse bg-purple-600" : "bg-slate-400"
+                          }`}
+                        />
+                        {isSmartTargeting ? "Phát thích ứng: BẬT" : "Phát thích ứng: TẮT"}
+                      </button>
+                    </div>
                   </div>
+
+                  {showTargetingConfig && (
+                    <div className="rounded-xl border border-purple-100 bg-purple-50/40 p-3 space-y-2.5 text-xs animate-in fade-in duration-200">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <span className="font-semibold text-slate-800 text-[11px] flex items-center gap-1">
+                            <span>⚡ Cắt ngang thông minh (Dynamic Cut-in)</span>
+                          </span>
+                          <p className="text-[10px] text-slate-500">Tự động ngắt clip khi phát hiện Thú cưng hoặc khán giả khớp mục tiêu ≥ 80%</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleUpdateTargeting({ cut_in_enabled: !isCutInEnabled })}
+                          className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                            isCutInEnabled ? "bg-purple-600" : "bg-slate-300"
+                          }`}
+                        >
+                          <span
+                            className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                              isCutInEnabled ? "translate-x-4" : "translate-x-0"
+                            }`}
+                          />
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 pt-1.5 border-t border-purple-100/60 text-[11px]">
+                        <div>
+                          <label className="block text-slate-600 font-medium mb-1 text-[10px]">
+                            Phát tối thiểu trước khi cắt:
+                          </label>
+                          <div className="flex items-center gap-1">
+                            {[2, 3, 5].map((sec) => (
+                              <button
+                                key={sec}
+                                type="button"
+                                onClick={() => handleUpdateTargeting({ cut_in_min_playback: sec })}
+                                className={`rounded px-2 py-0.5 text-[10px] font-semibold transition ${
+                                  currentMinPlayback === sec
+                                    ? "bg-purple-600 text-white"
+                                    : "bg-white border border-slate-200 text-slate-600 hover:bg-slate-100"
+                                }`}
+                              >
+                                {sec}s
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="block text-slate-600 font-medium mb-1 text-[10px]">
+                            Cửa sổ chốt trước hết clip:
+                          </label>
+                          <div className="flex items-center gap-1">
+                            {[2, 3, 5].map((sec) => (
+                              <button
+                                key={sec}
+                                type="button"
+                                onClick={() => handleUpdateTargeting({ lookahead_seconds: sec })}
+                                className={`rounded px-2 py-0.5 text-[10px] font-semibold transition ${
+                                  currentLookahead === sec
+                                    ? "bg-indigo-600 text-white"
+                                    : "bg-white border border-slate-200 text-slate-600 hover:bg-slate-100"
+                                }`}
+                              >
+                                -{sec}s
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   {stats?.recommendation ? (
                     <div className="space-y-2.5 text-xs">
@@ -1538,6 +1736,204 @@ export default function AdminPage() {
                       <p>Chưa phát hiện khán giả đứng trước camera.</p>
                       <p className="mt-1 text-[11px] text-slate-400">
                         Hệ thống sẽ tự động phân tích độ tuổi và giới tính để gợi ý quảng cáo phù hợp nhất.
+                      </p>
+                    </div>
+                  )}
+                </div>
+
+                {/* AI Ad Decision History / Logs */}
+                <div className="card p-4 space-y-3 border-blue-200 bg-gradient-to-b from-blue-50/20 via-white to-white">
+                  <div className="flex items-center justify-between border-b border-slate-200 pb-2.5">
+                    <div className="flex items-center gap-2">
+                      <span className="flex h-6 w-6 items-center justify-center rounded-md bg-blue-100 text-xs font-bold text-blue-700">
+                        📋
+                      </span>
+                      <div>
+                        <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
+                          Nhật Ký Đổi Quảng Cáo AI
+                        </h3>
+                        <p className="text-[10px] text-slate-500">Lịch sử quyết định phát clip theo đối tượng</p>
+                      </div>
+                    </div>
+                    <span className="rounded-full bg-slate-100 border border-slate-200 px-2 py-0.5 text-[10px] font-mono text-slate-600">
+                      {nowPlaying?.ad_logs?.length ?? 0} sự kiện
+                    </span>
+                  </div>
+
+                  <div className="max-h-64 space-y-2 overflow-y-auto pr-1">
+                    {(nowPlaying?.ad_logs ?? []).length > 0 ? (
+                      nowPlaying?.ad_logs?.map((log, idx) => (
+                        <div
+                          key={`${log.timestamp}-${log.creative_id}-${idx}`}
+                          className={`rounded-xl border p-2.5 text-xs transition ${
+                            idx === 0
+                              ? "border-emerald-300 bg-emerald-50/50 shadow-2xs"
+                              : "border-slate-200 bg-slate-50/60"
+                          }`}
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-1">
+                            <span className="font-mono text-[10px] text-slate-500 font-semibold">
+                              ⏱️ {log.timestamp}
+                            </span>
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                                log.mode === "smart_targeting"
+                                  ? "bg-purple-100 text-purple-700 border border-purple-200"
+                                  : log.mode === "manual"
+                                  ? "bg-blue-100 text-blue-700 border border-blue-200"
+                                  : "bg-slate-200 text-slate-700"
+                              }`}
+                            >
+                              {log.mode === "smart_targeting"
+                                ? "🎯 AI Thích Ứng"
+                                : log.mode === "manual"
+                                ? "👆 Thủ Công"
+                                : "🔄 Tuần Tự"}
+                            </span>
+                          </div>
+
+                          <div className="mt-1.5 flex items-center justify-between gap-2">
+                            <span className="font-bold text-slate-900 truncate">
+                              📺 {log.creative_name}
+                            </span>
+                            {log.match_score != null && (
+                              <span className="font-mono text-[11px] font-bold text-emerald-700 shrink-0">
+                                {log.match_score}% khớp
+                              </span>
+                            )}
+                          </div>
+
+                          {log.audience_summary && (
+                            <div className="mt-1 text-[11px] text-slate-600">
+                              <span className="text-slate-400">Khán giả: </span>
+                              <span className="font-medium text-slate-800">{log.audience_summary}</span>
+                            </div>
+                          )}
+
+                          {log.reason && (
+                            <p className="mt-1 text-[10px] leading-relaxed text-slate-500 italic">
+                              "{log.reason}"
+                            </p>
+                          )}
+                        </div>
+                      ))
+                    ) : (
+                      <div className="py-4 text-center text-xs text-slate-400">
+                        Chưa có nhật ký chuyển đổi quảng cáo. Bật playlist để ghi nhận.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Ambient Scene Context Widget (VLM Moondream2) */}
+                <div className="card p-4 space-y-3 border-teal-200 bg-gradient-to-b from-teal-50/30 via-white to-white">
+                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-200 pb-2.5">
+                    <div className="flex items-center gap-2">
+                      <span className="flex h-6 w-6 items-center justify-center rounded-md bg-teal-100 text-xs font-bold text-teal-700">
+                        VLM
+                      </span>
+                      <div>
+                        <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
+                          Ngữ Cảnh Môi Trường (VLM)
+                        </h3>
+                        <p className="text-[10px] text-slate-500">Moondream2 Vision AI · Cập nhật 20s/lần</p>
+                      </div>
+                    </div>
+                    <span className="inline-flex items-center gap-1 rounded-full bg-teal-50 border border-teal-200 px-2 py-0.5 text-[10px] font-semibold text-teal-700">
+                      <span className="h-1.5 w-1.5 rounded-full bg-teal-500 animate-pulse" />
+                      Greedy AI
+                    </span>
+                  </div>
+
+                  {stats?.ambient_context || stats?.recommendation?.scene_weather ? (
+                    <div className="space-y-2 text-xs">
+                      <div className="grid grid-cols-2 gap-2">
+                        {/* Weather / Lighting Box */}
+                        <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5">
+                          <p className="text-[10px] text-slate-500 font-medium">Thời tiết / Ánh sáng</p>
+                          <div className="mt-1 flex items-center gap-1.5 font-bold text-slate-800">
+                            {stats?.ambient_context?.weather === "sunny" || stats?.recommendation?.scene_weather === "sunny" ? (
+                              <>
+                                <span className="text-amber-500">☀️</span>
+                                <span>Nắng / Sáng rõ</span>
+                              </>
+                            ) : stats?.ambient_context?.weather === "rainy" || stats?.recommendation?.scene_weather === "rainy" ? (
+                              <>
+                                <span className="text-blue-500">🌧️</span>
+                                <span>Mưa / Mát mẻ</span>
+                              </>
+                            ) : stats?.ambient_context?.weather === "cloudy" || stats?.recommendation?.scene_weather === "cloudy" ? (
+                              <>
+                                <span className="text-slate-500">☁️</span>
+                                <span>Nhiều mây / Indoor</span>
+                              </>
+                            ) : (
+                              <span>{stats?.ambient_context?.weather || stats?.recommendation?.scene_weather || "Đang phân tích..."}</span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Crowd Activity Box */}
+                        <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5">
+                          <p className="text-[10px] text-slate-500 font-medium">Hoạt động đám đông</p>
+                          <div className="mt-1 flex items-center gap-1.5 font-bold text-slate-800">
+                            {stats?.ambient_context?.crowd_activity === "walking" ? (
+                              <>
+                                <span>🚶</span>
+                                <span>Đang di chuyển</span>
+                              </>
+                            ) : stats?.ambient_context?.crowd_activity === "shopping" ? (
+                              <>
+                                <span>🛍️</span>
+                                <span>Mua sắm</span>
+                              </>
+                            ) : (
+                              <>
+                                <span>🧍</span>
+                                <span>Đang đứng xem</span>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Objects Identified */}
+                      <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-2.5">
+                        <p className="text-[10px] text-slate-500 font-medium mb-1">Vật thể bối cảnh nhận diện:</p>
+                        <div className="flex flex-wrap gap-1">
+                          {(stats?.ambient_context?.objects?.length
+                            ? stats.ambient_context.objects
+                            : stats?.recommendation?.scene_objects?.length
+                            ? stats.recommendation.scene_objects
+                            : ["none"]
+                          ).map((obj, i) => (
+                            <span
+                              key={i}
+                              className={`rounded-md px-2 py-0.5 text-[10px] font-medium ${
+                                obj === "none"
+                                  ? "bg-slate-200/60 text-slate-500"
+                                  : "bg-teal-100/70 text-teal-800 border border-teal-200"
+                              }`}
+                            >
+                              {obj === "shopping bags"
+                                ? "🛍️ Túi xách / Balo"
+                                : obj === "laptops"
+                                ? "💻 Máy tính / Laptop"
+                                : obj === "food/beverage"
+                                ? "☕ Đồ ăn / Đồ uống"
+                                : obj === "none"
+                                ? "Không có vật thể đặc biệt"
+                                : obj}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="py-3 text-center text-xs text-slate-500">
+                      <p>Đang chờ chu kỳ quét bối cảnh VLM đầu tiên...</p>
+                      <p className="mt-0.5 text-[10px] text-slate-400">
+                        VLM tự động quét khung cảnh mỗi 20 giây để cung cấp thông tin cho CARE Engine.
                       </p>
                     </div>
                   )}
@@ -2014,6 +2410,49 @@ export default function AdminPage() {
                           </p>
                         )}
                       </div>
+
+                      {/* Pet & Style quick overview */}
+                      {(() => {
+                        const tracks = sessionDetailModal.tracks || [];
+                        const petTracks = tracks.filter((t) => t.has_pet);
+                        const dogCount = petTracks.filter((t) => t.pet_type === "dog").length;
+                        const catCount = petTracks.filter((t) => t.pet_type === "cat").length;
+                        const otherPetCount = petTracks.length - dogCount - catCount;
+
+                        const formalCount = tracks.filter((t) => t.clothing_style === "Formal").length;
+                        const sportCount = tracks.filter((t) => t.clothing_style === "Sport").length;
+                        const casualCount = tracks.filter((t) => t.clothing_style === "Casual").length;
+
+                        return (
+                          <div className="grid grid-cols-2 gap-2 text-[11px]">
+                            <div className="rounded-lg border border-amber-100 bg-amber-50/60 p-2.5">
+                              <span className="font-semibold text-amber-900 flex items-center gap-1">
+                                <span>🐾 Thú cưng phát hiện:</span>
+                              </span>
+                              <div className="mt-1 flex items-baseline gap-1.5 text-amber-800 font-bold text-xs">
+                                <span>{petTracks.length} người</span>
+                                {petTracks.length > 0 && (
+                                  <span className="text-[10px] font-normal text-amber-700">
+                                    ({dogCount > 0 ? `${dogCount} chó ` : ""}{catCount > 0 ? `${catCount} mèo ` : ""}{otherPetCount > 0 ? `${otherPetCount} khác` : ""})
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <div className="rounded-lg border border-slate-200 bg-slate-50/80 p-2.5">
+                              <span className="font-semibold text-slate-700 flex items-center gap-1">
+                                <span>👔 Cơ cấu trang phục:</span>
+                              </span>
+                              <div className="mt-1 flex items-center gap-1.5 text-[11px] text-slate-600 font-medium">
+                                <span>Casual: <strong className="text-slate-800">{casualCount}</strong></span>
+                                <span>·</span>
+                                <span>Formal: <strong className="text-slate-800">{formalCount}</strong></span>
+                                <span>·</span>
+                                <span>Sport: <strong className="text-slate-800">{sportCount}</strong></span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })()}
                     </div>
                   );
                 })()
@@ -2061,6 +2500,8 @@ export default function AdminPage() {
                         <th className="py-2 px-2">GIỚI TÍNH</th>
                         <th className="py-2 px-2 text-right">TUỔI</th>
                         <th className="py-2 px-2">NHÓM TUỔI</th>
+                        <th className="py-2 px-2">THÚ CƯNG</th>
+                        <th className="py-2 px-2">TRANG PHỤC</th>
                         <th className="py-2 px-2 text-right">HIỆN DIỆN</th>
                         <th className="py-2 px-2 text-right">DWELL</th>
                         <th className="py-2 px-3 text-center">CHÚ Ý</th>
@@ -2085,6 +2526,31 @@ export default function AdminPage() {
                           </td>
                           <td className="py-1.5 px-2 text-slate-600">
                             {t.age_group || <span className="text-slate-300">—</span>}
+                          </td>
+                          <td className="py-1.5 px-2">
+                            {t.has_pet ? (
+                              <span className="inline-flex items-center gap-1 rounded-md bg-amber-50 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700">
+                                {t.pet_type === "dog" ? "🐶 Chó" : t.pet_type === "cat" ? "🐱 Mèo" : "🐾 Thú cưng"}
+                              </span>
+                            ) : (
+                              <span className="text-slate-300">—</span>
+                            )}
+                          </td>
+                          <td className="py-1.5 px-2 text-slate-600">
+                            {t.clothing_color || t.clothing_style ? (
+                              <span className="inline-flex items-center gap-1">
+                                {t.clothing_color && (
+                                  <span className="capitalize">{t.clothing_color}</span>
+                                )}
+                                {t.clothing_style && (
+                                  <span className="rounded bg-slate-100 px-1 py-0.5 text-[9px] font-medium text-slate-600">
+                                    {t.clothing_style}
+                                  </span>
+                                )}
+                              </span>
+                            ) : (
+                              <span className="text-slate-300">—</span>
+                            )}
                           </td>
                           <td className="py-1.5 px-2 text-right font-mono text-slate-600">{t.presence_seconds.toFixed(1)}s</td>
                           <td className="py-1.5 px-2 text-right font-mono text-slate-600">{t.dwell_seconds.toFixed(1)}s</td>

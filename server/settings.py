@@ -12,7 +12,15 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import load_dotenv
+
 from configs import ROOT
+
+_ENV_FILE = ROOT / ".env"
+if _ENV_FILE.is_file():
+    load_dotenv(_ENV_FILE)
+else:
+    load_dotenv()
 
 MEDIA_DIR = Path(os.environ.get("SIGNAGE_MEDIA_DIR", ROOT / "media"))
 # The database lives in server/db.py behind DATABASE_URL — it is a connection

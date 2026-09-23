@@ -18,6 +18,7 @@ dwell time and unique count the dashboard reports.
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
 from dataclasses import dataclass, field
@@ -27,13 +28,12 @@ import numpy as np
 
 from configs import CFG
 from pipeline import Pipeline, PersonMeta
-from preprocess import preprocess
 from server import db
 from server.audience import AGE_GROUPS, normalize_age_group
 from server.player import PlaylistPlayer
 from server.settings import SETTINGS
 from server.sources import BROWSER_SOURCE, BrowserSource, LocalCameraSource, is_browser_source
-from viz import draw_person, draw_fps
+from viz import draw_tracking_hud
 
 # How many per-person rows one session may carry in `tracks_json`. A busy
 # hour is a few hundred; the cap only stops a runaway source turning one
@@ -95,6 +95,9 @@ class AnalyticsEngine:
         self._event_loop: asyncio.AbstractEventLoop | None = None
         self._fps = 0.0
         self._frame_index = 0
+        self._latest_recommendation: dict | None = None
+        self._last_rec_computed_time: float = 0.0
+        self._db_executor: ThreadPoolExecutor | None = None
 
         # Session tracking per device
         self._current_session_id: int | None = None
@@ -122,6 +125,8 @@ class AnalyticsEngine:
         with self._lock:
             if self._running:
                 return
+            if self._db_executor is None:
+                self._db_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="engine-db")
             self._source = source or SETTINGS.default_source
             self._error = None
             self._running = True
@@ -153,6 +158,14 @@ class AnalyticsEngine:
                 print(f"[Tracking Session] Lỗi tạo session trong DB: {e}")
                 self._current_session_id = None
 
+            # Clear old frame cache and metadata so new source starts fresh
+            with self._frame_cond:
+                self._latest_jpeg = None
+                self._frame_seq += 1
+                self._frame_cond.notify_all()
+            self._latest_metas = []
+            self._latest_recommendation = None
+
             self._thread = threading.Thread(target=self._loop, daemon=True, name="analytics")
             self._thread.start()
 
@@ -161,13 +174,22 @@ class AnalyticsEngine:
             if not self._running:
                 return
             self._running = False
+            self._latest_metas = []
+            self._latest_recommendation = None
         self._stop.set()
+        with self._frame_cond:
+            self._latest_jpeg = None
+            self._frame_seq += 1
+            self._frame_cond.notify_all()
         thread = self._thread
         if thread is not None:
             thread.join(timeout=5.0)
         now = time.time()
         self._flush_all(now)
         self._finalize_session(now)
+        if self._db_executor is not None:
+            self._db_executor.shutdown(wait=False)
+            self._db_executor = None
 
     def _session_digest(self) -> tuple[dict, list[dict]]:
         """Roll the per-track ledger up into the numbers a session report needs.
@@ -197,11 +219,19 @@ class AnalyticsEngine:
             presence_total += float(t["presence_seconds"])
 
         n = max(1, len(tracks))
+        pet_owners = sum(1 for t in tracks if t.get("has_pet"))
+        clothing_styles = {"Formal": 0, "Sport": 0, "Casual": 0, "unknown": 0}
+        for t in tracks:
+            st = t.get("clothing_style") or "unknown"
+            clothing_styles[st] = clothing_styles.get(st, 0) + 1
+
         demographics = {
             "genders": genders,
             "ages": ages,
             "unique_tracks": len(tracks),
             "attentive_tracks": len(self._session_attentive_tracks),
+            "pet_owners": pet_owners,
+            "clothing_styles": clothing_styles,
             "avg_age": round(sum(age_values) / len(age_values), 1) if age_values else None,
             "avg_presence_seconds": round(presence_total / n, 2),
             "total_dwell_seconds": round(dwell_total, 2),
@@ -321,6 +351,17 @@ class AnalyticsEngine:
         scene_weather = getattr(scene, "weather", None)
         scene_objects = [o.lower() for o in (getattr(scene, "objects", None) or []) if o and o != "none"]
 
+        # Pet context from pet_tracker
+        v_has_pet = getattr(priority_viewer, "has_pet", False)
+        v_pet_type = getattr(priority_viewer, "pet_type", None)
+        scene_pets = [p.pet_type for p in getattr(self._pipeline, "latest_pets", [])] if self._pipeline is not None else []
+        has_any_pet = v_has_pet or bool(scene_pets)
+        effective_pet_type = v_pet_type or (scene_pets[0] if scene_pets else None)
+
+        # Clothing context from clothing_tracker
+        v_clothing_color = getattr(priority_viewer, "clothing_color", None)
+        v_clothing_style = getattr(priority_viewer, "clothing_style", None)
+
         best_c = None
         best_score = -1.0
         scored: list[tuple[float, int]] = []
@@ -385,6 +426,52 @@ class AnalyticsEngine:
                 if "laptop" in obj_txt and ("công nghệ" in cat_txt or "gaming" in cat_txt):
                     score += 10.0
 
+            # Pet score (Thú cưng đi cùng)
+            tag_pet = (c.get("target_pet") or "all").lower()
+            cat_desc_pet = f"{c.get('category') or ''} {c.get('description') or ''}".lower()
+            is_pet_ad = tag_pet in ("yes", "pet", "dog", "cat") or any(
+                k in cat_desc_pet for k in ("thú cưng", "pet", "chó", "mèo", "pate")
+            )
+
+            if is_pet_ad:
+                if has_any_pet:
+                    # Khán giả có thú cưng -> Ưu tiên rất cao!
+                    if tag_pet == effective_pet_type:
+                        score += 45.0  # Khớp chính xác loại pet (ví dụ chó gặp quảng cáo chó)
+                    else:
+                        score += 40.0  # Có pet nói chung
+                else:
+                    # Chỉ phạt điểm khi module Pet Detection đang thực sự hoạt động.
+                    # Nếu module bị tắt hoặc lỗi, không phạt để bảo vệ quảng cáo thú cưng (graceful degradation).
+                    if getattr(CFG, "pet_enabled", False):
+                        score -= 30.0
+            else:
+                if tag_pet == "none":
+                    if not has_any_pet:
+                        score += 10.0
+                    else:
+                        score -= 10.0
+
+            # Clothing & Style score (Trang phục và phong cách)
+            tag_clothing = (c.get("target_clothing") or "all").lower()
+            tag_style = (c.get("target_style") or "all").lower()
+            cat_desc = f"{c.get('category') or ''} {c.get('description') or ''}".lower()
+
+            if v_clothing_style and tag_style != "all":
+                if tag_style == v_clothing_style.lower():
+                    score += 15.0
+                else:
+                    score -= 5.0
+            elif v_clothing_style:
+                if v_clothing_style == "Formal" and any(k in cat_desc for k in ("công sở", "xe", "bất động sản", "tài chính", "đồng hồ", "suit")):
+                    score += 15.0
+                elif v_clothing_style == "Sport" and any(k in cat_desc for k in ("thể thao", "sport", "gym", "fitness", "năng lượng", "giày")):
+                    score += 15.0
+
+            if v_clothing_color and tag_clothing != "all":
+                if tag_clothing == v_clothing_color.lower():
+                    score += 10.0
+
             score = max(10.0, min(99.0, score))
             scored.append((score, c["id"]))
             if score > best_score:
@@ -408,12 +495,34 @@ class AnalyticsEngine:
         weather_vi = {"sunny": "trời nắng", "cloudy": "trời nhiều mây", "rainy": "trời mưa"}.get(scene_weather)
         weather_clause = f", {weather_vi}" if weather_vi else ""
 
-        reason = f"{crowd_str} ({g_str} {age_str}) {att_str}{weather_clause} — phù hợp bối cảnh {target_crowd_display} và {cat_str}."
+        pet_str = ""
+        if has_any_pet:
+            pet_kind = "chó" if effective_pet_type == "dog" else "mèo" if effective_pet_type == "cat" else "thú cưng"
+            pet_str = f", có dắt theo {pet_kind}"
 
-        # Hand over the whole ranking, not just the winner: the player needs a
-        # runner-up for the boundary where the best match is the advert ending.
+        clothing_str = ""
+        if v_clothing_color:
+            style_clause = f" ({v_clothing_style})" if v_clothing_style else ""
+            clothing_str = f", mặc áo {v_clothing_color}{style_clause}"
+
+        reason = f"{crowd_str} ({g_str} {age_str}) {att_str}{weather_clause}{pet_str}{clothing_str} — phù hợp bối cảnh {target_crowd_display} và {cat_str}."
+
+        # Hand over the whole ranking and audience summary to the player
         if getattr(self.player, "smart_targeting", False):
-            self.player.set_audience_ranking([cid for _, cid in sorted(scored, reverse=True)])
+            audience_summary = f"{g_str} {age_str}{clothing_str}{pet_str}, {crowd_str}".strip(", ")
+            context_summary = {
+                "target_creative_id": best_c["id"],
+                "target_creative_name": best_c["name"],
+                "match_score": round(best_score, 1),
+                "audience_summary": audience_summary,
+                "reason": reason,
+                "scene_weather": scene_weather,
+                "scene_objects": scene_objects,
+            }
+            self.player.set_audience_ranking(
+                [cid for _, cid in sorted(scored, reverse=True)],
+                context_info=context_summary,
+            )
 
         return {
             "target_creative_id": best_c["id"],
@@ -428,13 +537,21 @@ class AnalyticsEngine:
             "people_count": people_count,
             "scene_weather": scene_weather,
             "scene_objects": scene_objects,
+            "has_pet": has_any_pet,
+            "pet_type": effective_pet_type,
+            "scene_pets": scene_pets,
+            "clothing_color": v_clothing_color,
+            "clothing_style": v_clothing_style,
             "reason": reason,
         }
 
     def snapshot(self) -> dict:
         with self._lock:
             metas = list(self._latest_metas)
-            rec = self._compute_recommendation(metas)
+            rec = self._latest_recommendation
+            if rec is None and metas:
+                rec = self._compute_recommendation(metas)
+            scene = self._pipeline.latest_context if self._pipeline is not None else None
             return {
                 "running": self._running,
                 "source": self._source,
@@ -446,7 +563,21 @@ class AnalyticsEngine:
                 "unique_viewers_session": len(self._unique_ids),
                 "error": self._error,
                 "recommendation": rec,
+                "ambient_context": {
+                    "weather": getattr(scene, "weather", None),
+                    "crowd_activity": getattr(scene, "crowd_activity", None),
+                    "objects": getattr(scene, "objects", []) or [],
+                } if scene is not None else None,
                 "smart_targeting": getattr(self.player, "smart_targeting", False),
+                "pets": [
+                    {
+                        "type": p.pet_type,
+                        "confidence": round(p.confidence, 2),
+                        "bbox": tuple(p.bbox),
+                        "owner_track_id": p.owner_track_id,
+                    }
+                    for p in getattr(self._pipeline, "latest_pets", [])
+                ] if self._pipeline is not None else [],
                 "tracks": [
                     {
                         "track_id": m.track_id,
@@ -458,6 +589,10 @@ class AnalyticsEngine:
                         "pitch": None if m.pitch is None else round(m.pitch, 1),
                         "attention": m.attention,
                         "dwell_time": round(m.dwell_time, 2),
+                        "has_pet": getattr(m, "has_pet", False),
+                        "pet_type": getattr(m, "pet_type", None),
+                        "clothing_color": getattr(m, "clothing_color", None),
+                        "clothing_style": getattr(m, "clothing_style", None),
                     }
                     for m in metas
                 ],
@@ -553,6 +688,10 @@ class AnalyticsEngine:
                     "gender": None,
                     "age": None,
                     "age_group": None,
+                    "has_pet": False,
+                    "pet_type": None,
+                    "clothing_color": None,
+                    "clothing_style": None,
                 }
                 self._session_tracks[m.track_id] = entry
 
@@ -572,14 +711,25 @@ class AnalyticsEngine:
                 entry["age"] = round(float(m.age), 1)
             if m.age_group:
                 entry["age_group"] = normalize_age_group(m.age_group) or m.age_group
+            if getattr(m, "has_pet", False):
+                entry["has_pet"] = True
+                if getattr(m, "pet_type", None):
+                    entry["pet_type"] = m.pet_type
+            if getattr(m, "clothing_color", None):
+                entry["clothing_color"] = m.clothing_color
+            if getattr(m, "clothing_style", None):
+                entry["clothing_style"] = m.clothing_style
 
         if len(metas) > self._session_peak_people:
             self._session_peak_people = len(metas)
 
-        # Periodic update to session in DB every 5 seconds
+        # Periodic update to session in DB every 5 seconds (asynchronous background task)
         if self._current_session_id and (now - self._session_last_update_time > 5.0):
             self._session_last_update_time = now
-            self._update_session(now, completed=False)
+            if self._db_executor:
+                self._db_executor.submit(self._update_session, now, False)
+            else:
+                self._update_session(now, completed=False)
 
     def _flush(self, state: _TrackState, now: float) -> None:
         """Persist one (airing, track) measurement, if it clears the noise floor."""
@@ -587,22 +737,31 @@ class AnalyticsEngine:
             return  # nothing was on screen; there is no advert to credit
         if state.presence < SETTINGS.min_presence_seconds:
             return  # a one-frame flicker from the tracker, not a person
+        if self._db_executor:
+            self._db_executor.submit(
+                self._do_flush,
+                state.track_id, state.first_seen, state.last_seen,
+                state.presence, state.attention, state.age_group,
+                state.gender, state.airing_id,
+            )
+        else:
+            self._do_flush(
+                state.track_id, state.first_seen, state.last_seen,
+                state.presence, state.attention, state.age_group,
+                state.gender, state.airing_id,
+            )
+
+    def _do_flush(self, track_id: int, first_seen: float, last_seen: float,
+                  presence: float, attention: float, age_group: str | None,
+                  gender: str | None, airing_id: int) -> None:
         try:
             db.execute(
                 """
                 INSERT INTO impressions
                     (airing_id, creative_id, track_id, first_seen, last_seen,
                      presence_seconds, attention_seconds, age_group, gender)
-                -- SELECT-from-airings rather than VALUES: an operator can delete
-                -- a creative while it is on air, and ON DELETE CASCADE takes the
-                -- airing with it while this thread still holds a state pointing
-                -- at it. Sourcing creative_id from the row makes the write a
-                -- no-op once the airing is gone, instead of inserting NULL and
-                -- killing the capture loop on a not-null violation.
                 SELECT a.id, a.creative_id, %s, %s, %s, %s, %s, %s, %s
                 FROM airings a WHERE a.id = %s
-                -- Re-flushed every time the track's numbers move, so the row is
-                -- always the latest measurement rather than the first one.
                 ON CONFLICT (airing_id, track_id) DO UPDATE SET
                     last_seen         = excluded.last_seen,
                     presence_seconds  = excluded.presence_seconds,
@@ -610,13 +769,10 @@ class AnalyticsEngine:
                     age_group         = COALESCE(excluded.age_group, impressions.age_group),
                     gender            = COALESCE(excluded.gender, impressions.gender)
                 """,
-                (state.track_id, state.first_seen, state.last_seen, state.presence,
-                 state.attention, state.age_group, state.gender, state.airing_id),
+                (track_id, first_seen, last_seen, presence,
+                 attention, age_group, gender, airing_id),
             )
         except Exception as exc:
-            # One lost measurement beats a dead screen. The loop's own handler
-            # tears the engine down, which for a kiosk would turn a transient
-            # database blip into analytics that never come back.
             with self._lock:
                 self._error = f"Không ghi được lượt xem: {exc}"
 
@@ -667,14 +823,28 @@ class AnalyticsEngine:
                         continue
                     break
 
-                prep = preprocess(frame)
-                # Wall-clock timing: a live camera is the target, and even a looped
-                # file is being replayed as if it were happening now.
                 now = time.time()
-                metas = self._pipeline.process(prep, now=now, source_frame=frame)
+                res = self._pipeline.process_frame(frame, now=now, source_frame=frame)
+                metas = res.metas
+                prep = res.processed_frame
                 self._observe(metas, now)
-                if getattr(self.player, "smart_targeting", False):
-                    self._compute_recommendation(metas)
+
+                # Throttled recommendation computation: run at most once every 1.0s or on new presence
+                rec = self._latest_recommendation
+                now_rec = time.time()
+                should_compute_rec = (
+                    metas and (
+                        (self._latest_recommendation is None)
+                        or (now_rec - self._last_rec_computed_time > 1.0)
+                    )
+                )
+                if should_compute_rec:
+                    self._last_rec_computed_time = now_rec
+                    rec = self._compute_recommendation(metas)
+                    self._latest_recommendation = rec
+                elif not metas:
+                    self._latest_recommendation = None
+                    rec = None
 
                 elapsed = max(time.perf_counter() - last_tick, 1e-6)
                 last_tick = time.perf_counter()
@@ -683,6 +853,7 @@ class AnalyticsEngine:
                 self._render(prep, metas, fps)
                 with self._lock:
                     self._latest_metas = metas
+                    self._latest_recommendation = rec
                     self._fps = fps
                     self._frame_index = frame_idx
                 frame_idx += 1
@@ -701,6 +872,8 @@ class AnalyticsEngine:
                     self._stop.wait(spare)
 
         except Exception as exc:  # a dead camera must not take the API down
+            import traceback
+            traceback.print_exc()
             with self._lock:
                 self._error = str(exc)
         finally:
@@ -721,9 +894,11 @@ class AnalyticsEngine:
 
     def _render(self, frame_bgr: np.ndarray, metas: list[PersonMeta], fps: float) -> None:
         canvas = frame_bgr.copy()
-        for m in metas:
-            draw_person(canvas, m)
-        draw_fps(canvas, fps)
+        pets = getattr(self._pipeline, "latest_pets", []) if self._pipeline else []
+        scene = getattr(self._pipeline, "latest_context", None) if self._pipeline else None
+
+        draw_tracking_hud(canvas, metas=metas, pets=pets, context=scene, fps=fps)
+
         ok, buf = cv2.imencode(".jpg", canvas, [int(cv2.IMWRITE_JPEG_QUALITY), SETTINGS.mjpeg_quality])
         if ok:
             jpeg_bytes = buf.tobytes()

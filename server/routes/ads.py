@@ -27,6 +27,15 @@ from server.settings import MEDIA_DIR, SETTINGS
 
 router = APIRouter(prefix="/api/ads", tags=["ads"])
 
+
+def _invalidate_player_cache() -> None:
+    try:
+        from server.state import PLAYER
+        if PLAYER:
+            PLAYER.invalidate_playlist_cache()
+    except Exception:
+        pass
+
 IMAGE_EXT = {".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"}
 VIDEO_EXT = {".mp4", ".mov", ".webm", ".m4v", ".avi", ".mkv"}
 
@@ -47,9 +56,13 @@ def to_public(row: dict) -> Creative:
         target_gender=row.get("target_gender") or "all",
         target_crowd=row.get("target_crowd") or "all",
         target_weather=row.get("target_weather") or "all",
+        target_pet=row.get("target_pet") or "all",
+        target_clothing=row.get("target_clothing") or "all",
+        target_style=row.get("target_style") or "all",
         category=row.get("category") or "Chung",
         description=row.get("description") or "",
     )
+
 
 
 def _video_duration(path: Path) -> float:
@@ -84,6 +97,9 @@ async def upload_ad(
     target_gender: str = Form("all"),
     target_crowd: str = Form("all"),
     target_weather: str = Form("all"),
+    target_pet: str = Form("all"),
+    target_clothing: str = Form("all"),
+    target_style: str = Form("all"),
     category: str = Form("Chung"),
     description: str = Form(""),
     add_to_playlist: bool = Form(True),
@@ -111,14 +127,18 @@ async def upload_ad(
     is_enabled = bool(add_to_playlist)
     new_id = db.insert(
         """INSERT INTO creatives (name, filename, kind, duration, position, enabled, created_at,
-                                  target_age_group, target_gender, target_crowd, target_weather, category, description)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                                  target_age_group, target_gender, target_crowd, target_weather,
+                                  target_pet, target_clothing, target_style,
+                                  category, description)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
         (display_name, stored, kind, duration, next_pos if is_enabled else 9999, is_enabled, time.time(),
          # Form fields skip the Pydantic validator, so canonicalise here too.
          normalize_target_age(target_age_group), target_gender, target_crowd, target_weather,
+         target_pet, target_clothing, target_style,
          category, description),
     )
     return to_public(db.query_one("SELECT * FROM creatives WHERE id = %s", (new_id,)))
+
 
 
 @router.post("/url", response_model=Creative, status_code=201)
@@ -205,6 +225,13 @@ class SmartTargetingRequest(BaseModel):
     enabled: bool
 
 
+class TargetingSettingsRequest(BaseModel):
+    smart_targeting: bool | None = None
+    cut_in_enabled: bool | None = None
+    cut_in_min_playback: float | None = None
+    lookahead_seconds: float | None = None
+
+
 @router.get("/smart-targeting")
 def get_smart_targeting() -> dict:
     from server.state import PLAYER
@@ -216,6 +243,23 @@ def set_smart_targeting(body: SmartTargetingRequest) -> dict:
     from server.state import PLAYER
     PLAYER.set_smart_targeting(body.enabled)
     return {"enabled": PLAYER.smart_targeting}
+
+
+@router.get("/targeting-settings")
+def get_targeting_settings() -> dict:
+    from server.state import PLAYER
+    return PLAYER.get_targeting_settings()
+
+
+@router.post("/targeting-settings")
+def set_targeting_settings(body: TargetingSettingsRequest) -> dict:
+    from server.state import PLAYER
+    return PLAYER.update_targeting_settings(
+        smart_targeting=body.smart_targeting,
+        cut_in_enabled=body.cut_in_enabled,
+        cut_in_min_playback=body.cut_in_min_playback,
+        lookahead_seconds=body.lookahead_seconds,
+    )
 
 
 @router.post("/{ad_id}/analyze", response_model=CreativeProfileResult)
@@ -250,6 +294,7 @@ def update_ad(ad_id: int, patch: CreativeUpdate) -> Creative:
     if fields:
         sets = ", ".join(f"{k} = %s" for k in fields)
         db.execute(f"UPDATE creatives SET {sets} WHERE id = %s", (*fields.values(), ad_id))
+        _invalidate_player_cache()
     return to_public(db.query_one("SELECT * FROM creatives WHERE id = %s", (ad_id,)))
 
 
@@ -260,6 +305,7 @@ def add_to_playlist(ad_id: int) -> Creative:
         raise HTTPException(404, "Không tìm thấy media")
     next_pos = (db.query_one("SELECT COALESCE(MAX(position), -1) + 1 AS p FROM creatives WHERE enabled = TRUE") or {}).get("p", 0)
     db.execute("UPDATE creatives SET enabled = TRUE, position = %s WHERE id = %s", (next_pos, ad_id))
+    _invalidate_player_cache()
     return to_public(db.query_one("SELECT * FROM creatives WHERE id = %s", (ad_id,)))
 
 
@@ -269,6 +315,7 @@ def remove_from_playlist(ad_id: int) -> Creative:
     if not row:
         raise HTTPException(404, "Không tìm thấy media")
     db.execute("UPDATE creatives SET enabled = FALSE WHERE id = %s", (ad_id,))
+    _invalidate_player_cache()
     return to_public(db.query_one("SELECT * FROM creatives WHERE id = %s", (ad_id,)))
 
 
@@ -280,13 +327,18 @@ def duplicate_ad(ad_id: int) -> Creative:
     next_pos = (db.query_one("SELECT COALESCE(MAX(position), -1) + 1 AS p FROM creatives WHERE enabled = TRUE") or {}).get("p", 0)
     new_id = db.insert(
         """INSERT INTO creatives (name, filename, kind, duration, position, enabled, created_at,
-                                  target_age_group, target_gender, target_crowd, target_weather, category, description)
-           VALUES (%s, %s, %s, %s, %s, TRUE, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                                  target_age_group, target_gender, target_crowd, target_weather,
+                                  target_pet, target_clothing, target_style,
+                                  category, description)
+           VALUES (%s, %s, %s, %s, %s, TRUE, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
         (f"{row['name']} (Bản sao)", row["filename"], row["kind"], row["duration"], next_pos, time.time(),
          row.get("target_age_group") or "all", row.get("target_gender") or "all",
          row.get("target_crowd") or "all", row.get("target_weather") or "all",
+         row.get("target_pet") or "all", row.get("target_clothing") or "all",
+         row.get("target_style") or "all",
          row.get("category") or "Chung", row.get("description") or ""),
     )
+    _invalidate_player_cache()
     return to_public(db.query_one("SELECT * FROM creatives WHERE id = %s", (new_id,)))
 
 
@@ -294,6 +346,7 @@ def duplicate_ad(ad_id: int) -> Creative:
 def reorder(order: PlaylistOrder) -> list[Creative]:
     for position, ad_id in enumerate(order.creative_ids):
         db.execute("UPDATE creatives SET position = %s WHERE id = %s", (position, ad_id))
+    _invalidate_player_cache()
     return list_ads()
 
 
@@ -304,6 +357,7 @@ def delete_ad(ad_id: int) -> None:
         raise HTTPException(404, "Không tìm thấy quảng cáo")
     filename = row["filename"]
     db.execute("DELETE FROM creatives WHERE id = %s", (ad_id,))
+    _invalidate_player_cache()
     # Only unlink the file if no other creative row references it
     other = db.query_one("SELECT id FROM creatives WHERE filename = %s LIMIT 1", (filename,))
     if not other:

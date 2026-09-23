@@ -11,6 +11,8 @@ import {
   CATEGORY_OPTIONS,
   CROWD_OPTIONS,
   GENDER_OPTIONS,
+  PET_OPTIONS,
+  STYLE_OPTIONS,
   WEATHER_OPTIONS,
 } from "@/lib/taxonomy";
 import {
@@ -41,6 +43,8 @@ export function EditMediaModal({
   const [targetGender, setTargetGender] = useState("all");
   const [targetCrowd, setTargetCrowd] = useState("all");
   const [targetWeather, setTargetWeather] = useState("all");
+  const [targetPet, setTargetPet] = useState("all");
+  const [targetStyle, setTargetStyle] = useState("all");
   const [description, setDescription] = useState("");
 
   const [saving, setSaving] = useState(false);
@@ -58,6 +62,8 @@ export function EditMediaModal({
       setTargetGender(media.target_gender || "all");
       setTargetCrowd(media.target_crowd || "all");
       setTargetWeather(media.target_weather || "all");
+      setTargetPet(media.target_pet || "all");
+      setTargetStyle(media.target_style || "all");
       setDescription(media.description || "");
       setError(null);
       setInfo(null);
@@ -88,6 +94,8 @@ export function EditMediaModal({
         target_gender: targetGender,
         target_crowd: targetCrowd,
         target_weather: targetWeather,
+        target_pet: targetPet,
+        target_style: targetStyle,
         description: description.trim(),
       });
       onSaveSuccess(updated);
@@ -347,7 +355,7 @@ export function EditMediaModal({
             </div>
           </div>
 
-          {/* Row 4: Target Weather & Description */}
+          {/* Row 4: Target Weather & Target Pet */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <label className="text-xs font-bold text-slate-700 block">
@@ -359,6 +367,42 @@ export function EditMediaModal({
                 className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-800 outline-none focus:bg-white focus:border-emerald-500 transition shadow-2xs cursor-pointer"
               >
                 {WEATHER_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-slate-700 block">
+                Thú cưng đi kèm
+              </label>
+              <select
+                value={targetPet}
+                onChange={(e) => setTargetPet(e.target.value)}
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-800 outline-none focus:bg-white focus:border-emerald-500 transition shadow-2xs cursor-pointer"
+              >
+                {PET_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* Row 5: Target Style & Description */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <label className="text-xs font-bold text-slate-700 block">
+                Phong cách trang phục
+              </label>
+              <select
+                value={targetStyle}
+                onChange={(e) => setTargetStyle(e.target.value)}
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-800 outline-none focus:bg-white focus:border-emerald-500 transition shadow-2xs cursor-pointer"
+              >
+                {STYLE_OPTIONS.map((opt) => (
                   <option key={opt.value} value={opt.value}>
                     {opt.label}
                   </option>

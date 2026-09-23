@@ -6,6 +6,7 @@ file. Import `CFG` elsewhere: `from configs import CFG`.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -71,7 +72,7 @@ class Config:
     mivolo_ckpt: Path = MODELS_DIR / "model_imdb_cross_person_4.22_99.46.pth.tar"
     age_enabled: bool = True
     age_gender_every_n: int = 5  # re-estimate every N frames while collecting votes
-    age_gender_samples: int = 7  # votes to collect per track before the answer settles
+    age_gender_samples: int = 3  # votes to collect per track before the answer settles
     # MiVOLO stayed within ~2-6 years of truth from 16px to 295px in testing (vs.
     # the old net's 44-year swing), so this floor only screens out degenerate
     # slivers of a crop, not "small but usable" faces.
@@ -89,13 +90,24 @@ class Config:
     attention_smooth_frames: int = 3  # temporal smoothing window
 
     # ---- 3 periodic VLM branch (Phase 6, optional) ----
-    # On, but currently inert: Moondream2 cannot load against transformers 5.x and
-    # the downgrade path collides with timm's huggingface-hub pin — see the blocker
-    # note in requirements-vlm.txt. SceneVLM degrades to an empty SceneContext, so
-    # the CARE engine scores on audience only until that is resolved upstream.
-    vlm_enabled: bool = True
-    vlm_period_seconds: float = 90.0
+    vlm_enabled: bool = field(
+        default_factory=lambda: os.environ.get("ENABLE_VLM", "true").strip().lower() in ("true", "1", "yes")
+    )
+    vlm_period_seconds: float = 30.0
     verbose: bool = False  # Toggle pipeline stage logging
+
+    # ---- 2.9 pet tracking (Phase 7: Pet & Animal Association) ----
+    pet_enabled: bool = True
+    pet_weights: Path = MODELS_DIR / "yolov8n.pt"
+    pet_conf_threshold: float = 0.35
+    pet_detect_every_n: int = 3       # run pet detector every 3 frames to preserve 30 FPS
+    pet_proximity_px: float = 350.0   # max distance (pixels) between person and pet center
+    pet_classes: tuple[int, ...] = (15, 16)  # COCO: 15=cat, 16=dog
+
+    # ---- 2.10 clothing & style tracking (Phase 8: Lightweight Apparel) ----
+    clothing_enabled: bool = True
+    clothing_min_samples: int = 2     # stable frames before triggering 1-shot color extraction
+
 
     # ---- honesty switches ----
     # When a model's weights are missing, stages report None rather than inventing a

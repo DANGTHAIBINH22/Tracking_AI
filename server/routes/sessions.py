@@ -14,12 +14,14 @@ plausible-looking numbers: `has_track_detail` says which kind of row it is.
 
 from __future__ import annotations
 
+import csv
+import io
 import json
 import time
 from datetime import datetime
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel
 
 from server import db
@@ -42,6 +44,10 @@ class TrackDetail(BaseModel):
     gender: str | None = None
     age: float | None = None
     age_group: str | None = None
+    has_pet: bool = False
+    pet_type: str | None = None
+    clothing_color: str | None = None
+    clothing_style: str | None = None
 
 
 class SessionSummary(BaseModel):
@@ -129,6 +135,10 @@ def _parse_tracks(raw: Any) -> list[TrackDetail]:
                 gender=t.get("gender"),
                 age=t.get("age"),
                 age_group=t.get("age_group"),
+                has_pet=bool(t.get("has_pet", False)),
+                pet_type=t.get("pet_type"),
+                clothing_color=t.get("clothing_color"),
+                clothing_style=t.get("clothing_style"),
             )
         )
     return out
@@ -266,3 +276,58 @@ def delete_session(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy phiên cần xoá.")
     db.execute("DELETE FROM tracking_sessions WHERE id = %s", (session_id,))
     return {"ok": True, "deleted_id": session_id}
+
+
+@router.get("/{session_id}/export.csv")
+def export_session_csv(
+    session_id: int,
+    user: Annotated[dict, Depends(get_current_user)] = None,
+) -> Response:
+    """Export all tracked people in this session as a CSV file."""
+    row = db.query_one("SELECT * FROM tracking_sessions WHERE id = %s", (session_id,))
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy phiên thu thập.")
+
+    summary = _summarize(row, time.time(), with_tracks=True)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "track_id",
+        "gender",
+        "age",
+        "age_group",
+        "has_pet",
+        "pet_type",
+        "clothing_color",
+        "clothing_style",
+        "first_seen",
+        "last_seen",
+        "presence_seconds",
+        "dwell_seconds",
+        "frames",
+        "attentive_frames",
+        "attentive",
+    ])
+    for t in summary.tracks:
+        writer.writerow([
+            t.track_id,
+            t.gender or "unknown",
+            t.age if t.age is not None else "",
+            t.age_group or "unknown",
+            "yes" if t.has_pet else "no",
+            t.pet_type or "",
+            t.clothing_color or "",
+            t.clothing_style or "",
+            datetime.fromtimestamp(t.first_seen).strftime("%Y-%m-%d %H:%M:%S") if t.first_seen else "",
+            datetime.fromtimestamp(t.last_seen).strftime("%Y-%m-%d %H:%M:%S") if t.last_seen else "",
+            round(t.presence_seconds, 1),
+            round(t.dwell_seconds, 1),
+            t.frames,
+            t.attentive_frames,
+            t.attentive,
+        ])
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=session_{summary.session_code}.csv"},
+    )

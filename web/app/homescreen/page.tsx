@@ -209,9 +209,16 @@ export default function HomeScreenPage() {
   const isDeviceConnected = Boolean(screenToken);
   const hasPlaylistAssigned = Boolean(screenInfo?.playlist_id);
 
-  // Camera Ingest: Only actively captures when tracking is running AND device is connected AND selected for a playlist
+  // Camera Ingest: Only actively captures when tracking is running in BROWSER mode AND device is connected AND selected for a playlist
   const isCaptureRunning = Boolean(stats?.running && isDeviceConnected && hasPlaylistAssigned);
-  const { videoRef } = useCameraIngest(isCaptureRunning);
+  const isBrowserIngestActive = Boolean(isCaptureRunning && stats?.mode === "browser");
+  const { videoRef } = useCameraIngest(isBrowserIngestActive);
+
+  // Stream cache-busting key: forces reconnect when source or running state switches
+  const [streamKey, setStreamKey] = useState<number>(() => Date.now());
+  useEffect(() => {
+    setStreamKey(Date.now());
+  }, [stats?.source, stats?.running, stats?.mode]);
 
   const nowPlaying = stats?.now_playing ?? null;
   // STRICT RULE: Playlist playback is ONLY permitted when device is connected AND selected to play a playlist
@@ -223,11 +230,14 @@ export default function HomeScreenPage() {
   const toggleTracking = async () => {
     if (!isDeviceConnected) return;
     try {
+      setStreamKey(Date.now());
       if (isCaptureRunning) {
         await api.captureStop();
       } else {
-        await api.captureStart("browser");
+        const scrId = typeof screenInfo?.id === "number" ? screenInfo.id : undefined;
+        await api.captureStart("browser", String(screenInfo?.id || "browser"), scrId);
       }
+      setStreamKey(Date.now());
     } catch (err) {
       console.error("Lỗi điều khiển tracking:", err);
     }
@@ -436,9 +446,11 @@ export default function HomeScreenPage() {
                 ? "Thiết bị chưa kết nối"
                 : !hasPlaylistAssigned
                 ? "Chưa chọn thiết bị phát Playlist"
-                : isCaptureRunning
-                ? "Tạm dừng AI Audience Tracking (T)"
-                : "Bật AI Audience Tracking (T)"
+                : !isCaptureRunning
+                ? "Bật AI Audience Tracking bằng Webcam màn hình (T)"
+                : stats?.mode === "server"
+                ? `Đang phân tích bằng Video Test (${stats.source?.split("/").pop() || "Server"}). Bấm để tạm dừng (T)`
+                : "Đang ghi nhận khán giả qua Webcam màn hình. Bấm để tạm dừng (T)"
             }
             className={`flex h-9 items-center gap-1.5 rounded-xl border px-3 text-xs font-semibold transition ${
               !isDeviceConnected || !hasPlaylistAssigned
@@ -457,7 +469,13 @@ export default function HomeScreenPage() {
                   : "bg-zinc-500"
               }`}
             />
-            <span>{isCaptureRunning ? "AI Tracking BẬT" : "AI Tracking TẮT"}</span>
+            <span>
+              {!isCaptureRunning
+                ? "AI Tracking TẮT"
+                : stats?.mode === "server"
+                ? `🎬 Video AI (${stats.source?.split("/").pop() || "Server"})`
+                : "📹 Camera Kiosk (Live)"}
+            </span>
           </button>
 
           {/* PiP AI Camera Toggle */}
@@ -732,13 +750,17 @@ export default function HomeScreenPage() {
         {/* --- OPTIONAL PiP WINDOW: Live AI Bounding Box Stream --- */}
         {isDeviceConnected && displayMode === "pip" && (
           <div className="absolute bottom-20 right-6 z-20 w-80 aspect-video rounded-xl overflow-hidden border-2 border-emerald-500/60 shadow-2xl bg-black backdrop-blur-md transition hover:scale-105">
-            <div className="absolute top-2 left-2 z-10 px-2 py-0.5 rounded bg-black/70 text-[10px] text-emerald-300 font-mono">
-              Live AI Tracking ({stats?.people_now ?? 0} người)
+            <div className="absolute top-2 left-2 z-10 px-2 py-0.5 rounded bg-black/70 text-[10px] text-emerald-300 font-mono flex items-center gap-1.5">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span>
+                {stats?.mode === "server" ? "🎬 Video Mô Phỏng" : "📹 Webcam Kiosk"} ({stats?.people_now ?? 0} người)
+              </span>
             </div>
             {isCaptureRunning ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
-                src={`${API_BASE}/api/capture/stream.mjpg`}
+                key={`${stats?.source}-${streamKey}`}
+                src={`${API_BASE}/api/capture/stream.mjpg?t=${streamKey}`}
                 alt="Camera AI PiP"
                 className="w-full h-full object-cover"
               />

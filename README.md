@@ -15,18 +15,22 @@ graph TD
     A[Camera / Webcam] -->|Luồng BGR Frame| B(Edge AI Preprocessing)
     B -->|Resize & CLAHE| C{Phát phân nhánh}
   
-    C -->|Real-time Branch: Mỗi frame| D[YOLOv8-Face & ByteTrack]
+    C -->|Real-time Face: Mỗi frame| D[YOLOv8-Face & ByteTrack]
     D -->|Crop Face với 30% margin| E[Estimators]
     E -->|ONNX MiVOLO| F[Age & Gender]
     E -->|MediaPipe mesh + solvePnP| G[Head Pose & Attention Classifier]
-    F & G -->|Bỏ phiếu & làm mịn| H[Metadata người dùng: M_user]
+    
+    C -->|Pet Tracking: Mỗi 3 frames| H_pet[YOLOv8n - COCO Pets]
+    H_pet -->|Ghép cặp không gian Proximity| I_pet[PersonMeta: has_pet, pet_type]
+    
+    F & G & I_pet -->|Bỏ phiếu & làm mịn| H[Metadata người dùng: M_user]
   
     C -->|Periodic Branch: Mỗi 1-2 phút| I[Asynchronous VLM Thread]
     I -->|Moondream VLM VQA| K[Weather, Activity, Objects]
     K -->|Regex Parser| L[Metadata bối cảnh: M_env]
   
     H & L -->|Socket/FastAPI Request| M[FastAPI Backend - CARE Engine]
-    M -->|Chấm điểm Weighted Scoring| N[Ad Player Interface Next.js]
+    M -->|Chấm điểm Multi-dimensional Scoring| N[Ad Player Interface Next.js]
     M -->|Lưu log tương tác L| O[(PostgreSQL Database)]
     O -->|Đọc số liệu| P[CMS Dashboard ECharts]
 ```
@@ -41,35 +45,75 @@ graph TD
 
 ### 4. Cơ cấu Cơ sở dữ liệu (Database Construction)
 
-Cơ sở dữ liệu PostgreSQL lưu trữ dữ liệu log tương tác (`L = {timestamp, M_user, M_env, v*}`) phục vụ trực quan hóa lên CMS Dashboard:
+Cơ sở dữ liệu PostgreSQL lưu trữ dữ liệu log tương tác (`L = {timestamp, M_user, M_env, v*}`), cấu hình chiến dịch quảng cáo và phiên phân tích camera:
 
 ```sql
--- Bảng lưu thông tin quảng cáo (Advertisements)
-CREATE TABLE advertisements (
+-- 1. Bảng lưu thông tin quảng cáo (Creatives)
+CREATE TABLE creatives (
     id SERIAL PRIMARY KEY,
-    title VARCHAR(255) NOT NULL,
-    video_url VARCHAR(512) NOT NULL,
-    target_gender VARCHAR(10),       -- M, F, hoặc ALL
-    target_age_group VARCHAR(20),    -- 0-18, 18-35, 35-55, 55+
-    target_context VARCHAR(100)[],   -- Các tag bối cảnh ví dụ: ['rainy', 'laptops']
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    name TEXT NOT NULL,
+    filename TEXT NOT NULL,
+    kind TEXT NOT NULL CHECK (kind IN ('image', 'video')),
+    duration DOUBLE PRECISION NOT NULL DEFAULT 15.0,
+    position INTEGER NOT NULL DEFAULT 0,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at DOUBLE PRECISION NOT NULL,
+    target_age_group TEXT DEFAULT 'all',  -- '<18', '19-35', '36-50', '>55', 'all'
+    target_gender TEXT DEFAULT 'all',     -- 'M', 'F', 'all'
+    target_crowd TEXT DEFAULT 'all',      -- 'single', 'group', 'crowd', 'all'
+    target_weather TEXT DEFAULT 'all',    -- 'sunny', 'rainy', 'cloudy', 'all'
+    target_pet TEXT DEFAULT 'all',        -- 'dog', 'cat', 'yes', 'none', 'all'
+    target_clothing TEXT DEFAULT 'all',   -- 'black', 'white', 'blue', 'red', 'all'
+    target_style TEXT DEFAULT 'all',      -- 'Formal', 'Sport', 'Casual', 'all'
+    category TEXT DEFAULT 'Chung',        -- 'Thực phẩm & Đồ uống', 'Thời trang & Làm đẹp', 'Công nghệ & Gaming'
+    description TEXT DEFAULT ''
 );
 
--- Bảng lưu log tương tác của khách hàng (User Interaction Logs)
-CREATE TABLE interaction_logs (
+-- 2. Bảng lưu từng lượt phát sóng quảng cáo (Airings)
+CREATE TABLE airings (
     id SERIAL PRIMARY KEY,
-    track_id INT NOT NULL,           -- Sinh ra từ ByteTrack để phân biệt khách hàng
-    gender VARCHAR(10),              -- Giới tính nhận diện từ MiVOLO
-    age_group VARCHAR(20),           -- Nhóm tuổi nhận diện từ MiVOLO
-    yaw FLOAT,                       -- Góc xoay đầu ngang từ solvePnP
-    pitch FLOAT,                     -- Góc xoay đầu dọc từ solvePnP
-    attention INT DEFAULT 0,         -- 1: Có chú ý nhìn, 0: Không nhìn
-    dwell_time FLOAT DEFAULT 0.0,    -- Thời gian nhìn lũy kế (giây)
-    ad_played_id INT REFERENCES advertisements(id), -- Quảng cáo đã phát
-    weather VARCHAR(50),             -- Bối cảnh thời tiết tại thời điểm t
-    crowd_activity VARCHAR(100),     -- Hoạt động bối cảnh đám đông
-    objects_detected TEXT,           -- Vật thể bối cảnh phát hiện (phân tách bằng '|')
-    logged_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    creative_id INTEGER NOT NULL REFERENCES creatives(id) ON DELETE CASCADE,
+    started_at DOUBLE PRECISION NOT NULL,
+    ended_at DOUBLE PRECISION
+);
+
+-- 3. Bảng lưu log tương tác chi tiết từng người xem (Impressions)
+CREATE TABLE impressions (
+    id SERIAL PRIMARY KEY,
+    airing_id INTEGER NOT NULL REFERENCES airings(id) ON DELETE CASCADE,
+    creative_id INTEGER NOT NULL REFERENCES creatives(id) ON DELETE CASCADE,
+    track_id INTEGER NOT NULL,
+    first_seen DOUBLE PRECISION NOT NULL,
+    last_seen DOUBLE PRECISION NOT NULL,
+    presence_seconds DOUBLE PRECISION NOT NULL,
+    attention_seconds DOUBLE PRECISION NOT NULL,
+    age_group TEXT,
+    gender TEXT,
+    has_pet BOOLEAN DEFAULT FALSE,        -- Khách hàng có dắt theo thú cưng
+    pet_type TEXT,                        -- 'dog' hoặc 'cat'
+    clothing_color TEXT,                  -- Màu áo chủ đạo
+    clothing_style TEXT,                  -- Phong cách: 'Formal', 'Sport', 'Casual'
+    UNIQUE (airing_id, track_id)
+);
+
+-- 4. Bảng lưu lịch sử phiên chạy camera (Tracking Sessions)
+CREATE TABLE tracking_sessions (
+    id SERIAL PRIMARY KEY,
+    session_code TEXT UNIQUE NOT NULL,
+    device_id TEXT NOT NULL DEFAULT 'host',
+    screen_id INTEGER REFERENCES screens(id),
+    source TEXT NOT NULL,
+    started_at DOUBLE PRECISION NOT NULL,
+    ended_at DOUBLE PRECISION,
+    status TEXT NOT NULL DEFAULT 'active',
+    total_footfall INTEGER DEFAULT 0,
+    total_impressions INTEGER DEFAULT 0,
+    attention_rate DOUBLE PRECISION DEFAULT 0.0,
+    avg_dwell_time DOUBLE PRECISION DEFAULT 0.0,
+    peak_people INTEGER DEFAULT 0,
+    notes TEXT NOT NULL DEFAULT '',
+    demographics_json TEXT NOT NULL DEFAULT '{}',
+    tracks_json TEXT NOT NULL DEFAULT '[]' -- Chi tiết từng người: tuổi, giới tính, pet, màu áo, style, dwell
 );
 ```
 
@@ -77,15 +121,30 @@ CREATE TABLE interaction_logs (
 
 1. **Camera Input**: Luồng camera liên tục ghi lại BGR frame.
 2. **Preprocessing**: Ảnh được resize (cạnh dài 640px) để duy trì tốc độ và cân bằng sáng bằng bộ lọc **CLAHE** chống ngược sáng.
-3. **Real-time Branch (Nhánh thời gian thực)**:
+3. **Real-time Face Branch (Nhánh khuôn mặt thời gian thực)**:
    * **YOLOv8-Face** phát hiện mặt, kết hợp thuật toán **ByteTrack** gán `track_id` ổn định.
-   * Cắt rộng mặt 30% margin đưa qua **MiVOLO** nhận diện tuổi/giới tính. Lấy trung vị và bỏ phiếu bầu sau 7 mẫu đầu để khóa thuộc tính, chống giật đổi thông số.
+   * Cắt rộng mặt 30% margin đưa qua **MiVOLO v2 ONNX** nhận diện tuổi/giới tính. Lấy trung vị và bỏ phiếu bầu sau 7 mẫu đầu để khóa thuộc tính, chống giật đổi thông số.
    * Dùng **MediaPipe Face Mesh** trích xuất 6 điểm mốc chính, giải bài toán **PnP (Perspective-n-Point)** tìm góc quay đầu. Lọc làm mịn theo thời gian để tính `attention` và cộng dồn `dwell_time`.
-4. **Periodic Branch (Nhánh bối cảnh nền)**:
-   * Thread riêng chạy bất đồng bộ mỗi 90 giây gửi frame về **Moondream VLM** để chạy VQA câu hỏi đóng nhận biết bối cảnh.
-5. **CARE Recommendation Engine & Interface**:
-   * API Backend tiếp nhận metadata, tính toán điểm độ phù hợp của quảng cáo dựa trên demographics (tuổi, giới tính) và bối cảnh (thời tiết, hoạt động xung quanh).
-   * Ad Player Next.js nhận video chỉ định và phát mượt mà qua cơ chế đệm kép (Double Buffering). Dữ liệu lưu vào database PostgreSQL.
+4. **Pet Tracking Branch (Nhánh theo vết Thú cưng)**:
+   * **YOLOv8n** quét tìm chó (`dog`) và mèo (`cat`) mỗi 3 frame (tiết kiệm tài nguyên).
+   * Thuật toán **Spatial Proximity Matching** tính khoảng cách giữa tâm thú cưng và vị trí đứng của người gần nhất để gán quyền sở hữu (`has_pet = True`, `pet_type = 'dog'|'cat'`).
+5. **Clothing & Style Branch (Nhánh Trang phục & Phong cách Siêu nhẹ)**:
+   * Cắt vùng thân trên (Upper-body torso) ngay dưới mặt, áp dụng **K-Means ($k=3$)** trích xuất màu áo chủ đạo ($< 0.5\text{ ms}$, $0\text{ MB}$).
+   * Phân loại phong cách (*Formal / Sport / Casual*) qua phân bố màu sắc theo cơ chế **One-shot per Track**, lưu cache bảo toàn 30 FPS.
+6. **Periodic Branch & Taxonomy Binding (Nhánh bối cảnh nền VLM)**:
+   * Thread riêng chạy bất đồng bộ mỗi 30–90 giây gửi frame về **Moondream2 VLM** để chạy VQA câu hỏi đóng nhận biết thời tiết và vật thể ngoại cảnh (đồ ăn, túi shopping, laptop).
+   * Dropdown Thể loại ngành hàng trên giao diện `/ads` liên kết trực tiếp với các nhãn vật thể VLM để cộng thưởng $+10.0$ điểm khi phát hiện bối cảnh khớp.
+7. **CARE Recommendation Engine**:
+   * Chấm điểm đa chiều dựa trên demographics (tuổi, giới tính), thú cưng (`+40.0` điểm cho pet ad), trang phục/phong cách (+15.0 điểm) và bối cảnh (thời tiết $+20.0$, vật thể $+10.0$).
+8. **Dynamic Cut-in & Lookahead Window (Cơ chế ngắt thông minh & Cửa sổ tính toán trước)**:
+   * **Dynamic Cut-in**: Khi phát hiện mục tiêu khẩn cấp giá trị cao (khách dắt thú cưng hoặc match score $\ge 80\%$), nếu quảng cáo hiện tại đã phát tối thiểu $T_{\text{min}}$ (3.0s), player lập tức ngắt sớm để mở ngay clip thích ứng.
+   * **Lookahead Pre-decision Window**: Trong $N$ giây cuối trước khi video kết thúc (3.0s), player đánh giá khán giả và khóa trước clip tiếp theo, loại trừ độ trễ chuyển cảnh (0s latency).
+   * Hỗ trợ cài đặt tham số linh hoạt trực tiếp trên giao diện Admin qua nút **"⚙️ Cài đặt"**.
+9. **Fair Ad Rotation via Least Recently Played (LRP)**:
+   * Khi không có khán giả trước màn hình, hệ thống xoay vòng theo thuật toán LRP: video có thời gian phát xa nhất trong quá khứ (hoặc chưa từng phát) được ưu tiên chiếu trước, video vừa chiếu xong bị loại trừ ngay, triệt tiêu việc lặp đi lặp lại các video 1, 2, 3 đầu danh mục.
+10. **Ad Player Interface & Session Ledger**:
+   * Ad Player Next.js nhận video chỉ định và phát mượt mà qua cơ chế đệm kép (Double Buffering).
+   * Lịch sử phiên ghi nhận chi tiết danh sách người xem kèm thuộc tính thú cưng, màu áo, style, hỗ trợ xem trực quan và xuất CSV 16 cột.
 
 ---
 
@@ -104,29 +163,22 @@ uv sync
 
 ### 2. Tải và Thiết lập các File Trọng số (Model Weights Setup)
 
-Để hệ thống hoạt động đầy đủ tính năng suy luận AI, bạn cần thiết lập các tệp tin trọng số mô hình trong thư mục `models/` (đã được cấu hình trong `configs.py` và được bỏ qua trong Git):
+Hệ thống cung cấp script **chuẩn bị tự động toàn bộ mô hình chỉ với 1 câu lệnh**:
 
-#### A. Trọng số YOLOv8-Face (`models/yolov8n-face.pt` - ~6MB)
-* **Tự động:** Khi khởi chạy lần đầu qua các lệnh `run_webcam.py`, `run_video.py` hoặc `test_pipeline_dryrun.py`, hệ thống sẽ tự động phát hiện và tải file này từ Hugging Face về thư mục `models/` cho bạn.
-* **Thủ công:** Bạn có thể tải trực tiếp từ link [Hugging Face YOLOv8-Face](https://huggingface.co/junjiang/GestureFace/resolve/main/yolov8n-face.pt) và đặt vào thư mục:
-  `models/yolov8n-face.pt`
+```bash
+# Chuẩn bị và kiểm tra toàn bộ YOLOv8-Face, YOLOv8n Pets, MiVOLO v2 ONNX và Video Ads:
+uv run python prepare_models.py
 
-#### B. Trọng số MiVOLO ONNX (`models/mivolo_age_gender.onnx` - ~100MB)
-Do tệp trọng số MiVOLO ONNX chính gốc không có liên kết tải trực tiếp chính thức và bị bỏ qua trong Git, bạn có hai cách tiếp cận:
-* **Cách 1: Lấy file ONNX trực tiếp từ nhóm thiết kế** (Khuyên dùng). Sao chép tệp `mivolo_age_gender.onnx` do nhóm chuyển giao vào thư mục:
-  `models/mivolo_age_gender.onnx`
-* **Cách 2: Tự tạo file ONNX nội bộ (Surrogate ONNX model)**: Kích hoạt môi trường ảo và chạy lệnh sau để tự sinh một mô hình ONNX thay thế giúp pipeline chạy thật trên ONNX Runtime:
-  ```bash
-  # Tải thư viện hỗ trợ xuất ONNX
-  uv pip install onnxscript
-  
-  # Chạy script tự động xuất ONNX mô phỏng
-  uv run python -c "import urllib.request; urllib.request.urlretrieve('https://raw.githubusercontent.com/binhdang/UIT/main/generate_mivolo_onnx.py', 'generate_mivolo_onnx.py'); import subprocess; subprocess.run(['python', 'generate_mivolo_onnx.py'])"
-  ```
+# (Tùy chọn) Bỏ qua tải trước 1.6 GB Moondream2 VLM nếu chỉ chạy camera thời gian thực:
+uv run python prepare_models.py --skip-vlm
+```
 
-#### C. Trọng số Moondream VLM (`vikhyat/moondream2` - ~1.6GB)
-* **Tự động:** Khi bạn bật chế độ VLM (`vlm_enabled: bool = True` trong `configs.py`), luồng chạy nền sẽ tự động tải Moondream2 thông qua thư viện `transformers` của Hugging Face và lưu vào thư mục cache của hệ thống.
-* **Yêu cầu:** Máy tính cần có kết nối mạng Internet ở lần khởi chạy đầu tiên. Thư viện sẽ tự động phân phối trọng số tối ưu (định dạng `float16` trên Apple Silicon/CUDA, `float32` trên CPU) với cờ `trust_remote_code=True`.
+Nếu muốn thiết lập thủ công từng mô hình, bạn xem hướng dẫn chi tiết tại [**DOWNLOAD_MODELS.md**](DOWNLOAD_MODELS.md):
+*   **YOLOv8-Face (`models/yolov8n-face.pt` - ~6.1MB):** Tự động tải từ Hugging Face khi khởi chạy lần đầu hoặc qua `prepare_models.py`.
+*   **YOLOv8n Pets (`models/yolov8n.pt` - ~6.2MB):** Tự động tải qua `prepare_models.py` phục vụ nhận diện chó & mèo.
+*   **MiVOLO v2 ONNX (`models/mivolo_age_gender.onnx` + `.data` - ~112.5MB):** Tự động tải từ Hugging Face Hub và xuất sang chuẩn ONNX khi chạy `prepare_models.py`.
+*   **Moondream2 VLM (`vikhyatk/moondream2` - ~1.6GB):** Tải tự động vào cache Hugging Face khi chuẩn bị với `prepare_models.py` (không dùng cờ `--skip-vlm`).
+
 
 ### 3. Chạy thử nghiệm Demo
 
@@ -236,16 +288,22 @@ Tài liệu API tự sinh tại <http://localhost:8000/docs>.
 
 | Endpoint | Ý nghĩa |
 | :--- | :--- |
-| `GET/POST/PATCH/DELETE /api/ads` | Thư viện quảng cáo (upload ảnh/video, đổi tên, thời lượng, bật/tắt) |
+| `GET/POST/PATCH/DELETE /api/ads` | Thư viện quảng cáo (upload ảnh/video, đổi tên, thời lượng, phân khúc target, bật/tắt) |
 | `PUT /api/ads/order` | Sắp xếp thứ tự chiếu |
-| `POST /api/player/start\|stop\|skip` | Điều khiển playlist |
+| `GET/POST /api/ads/targeting-settings` | Cấu hình tham số Dynamic Cut-in & Lookahead Pre-decision Window |
+| `POST /api/player/start\|stop\|skip` | Điều khiển playlist (bật, dừng, bỏ qua clip) |
 | `GET /api/player/now-playing` | Quảng cáo đang trên màn hình + thời gian còn lại |
 | `POST /api/capture/start\|stop` | Bật/tắt camera (`"0"` = webcam, hoặc đường dẫn video) |
-| `GET /api/capture/stream.mjpg` | Luồng MJPEG đã vẽ bbox/góc đầu/attention |
-| `GET /api/analytics/live` | Ảnh chụp tức thời: đang có mặt, đang nhìn, danh sách track |
-| `GET /api/analytics/summary` | Báo cáo theo từng quảng cáo |
-| `GET /api/analytics/timeline` | Nhật ký từng lượt chiếu |
-| `GET /api/analytics/export.csv` | Xuất toàn bộ impression ra CSV |
+| `GET /api/capture/sources` | Danh sách webcam và video test mô phỏng khả dụng |
+| `POST /api/capture/upload-test-video` | Tải video test mới lên thư mục `inputs/` |
+| `GET /api/capture/stream.mjpg` | Luồng MJPEG đã vẽ bbox/góc đầu/attention/pet vector |
+| `GET /api/sessions` | Lịch sử danh sách các phiên chạy tracking camera |
+| `GET /api/sessions/{id}` | Chi tiết phiên & mảng `tracks` (tuổi, giới tính, thú cưng, màu áo, style) |
+| `GET /api/sessions/{id}/tracks/export.csv` | Xuất toàn bộ dữ liệu người xem trong phiên ra file CSV 16 cột |
+| `GET /api/analytics/live` | Ảnh chụp tức thời: đang có mặt, đang nhìn, danh sách track trực tiếp |
+| `GET /api/analytics/summary` | Báo cáo hiệu suất theo từng quảng cáo |
+| `GET /api/analytics/timeline` | Nhật ký từng lượt chiếu quảng cáo (`airings`) |
+| `GET /api/analytics/export.csv` | Xuất toàn bộ impressions ra CSV |
 | `WS /ws/live` | Đẩy số liệu trực tiếp mỗi giây |
 
 ### 3. Chạy frontend

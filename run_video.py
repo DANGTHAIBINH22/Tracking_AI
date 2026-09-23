@@ -19,9 +19,8 @@ import cv2
 
 import time
 from configs import OUTPUTS_DIR, CFG
-from preprocess import preprocess
 from pipeline import PersonMeta
-from viz import draw_person, draw_fps
+from viz import draw_tracking_hud
 
 CSV_FIELDS = ["frame", *PersonMeta.__annotations__.keys(), "weather", "crowd_activity", "objects"]
 
@@ -70,17 +69,18 @@ def main() -> None:
                 ok, frame = cap.read()
                 if not ok:
                     break
-                frame_prep = preprocess(frame)
-                
                 start_frame = time.time()
-                metas = pipe.process(frame_prep, now=frame_idx / fps, source_frame=frame)
-                
+                # Xử lý toàn bộ pipeline AI và tiền xử lý (Single Source of Truth)
+                res = pipe.process_frame(frame, now=frame_idx / fps, source_frame=frame)
+                metas = res.metas
+                frame_prep = res.processed_frame
+                ctx = res.context
+
                 # Trích xuất bối cảnh VLM
-                ctx = pipe.latest_context
                 weather = ctx.weather
                 crowd_activity = ctx.crowd_activity
                 objects_str = "|".join(ctx.objects) if isinstance(ctx.objects, list) else str(ctx.objects)
-                
+
                 for m in metas:
                     row = {
                         "frame": frame_idx,
@@ -90,25 +90,20 @@ def main() -> None:
                         "objects": objects_str
                     }
                     writer.writerow(row)
-                
-                # Vẽ bounding boxes và các thuộc tính lên ảnh
-                for m in metas:
-                    draw_person(frame_prep, m)
-                
-                # Đo và vẽ FPS
+
+                # Đo FPS
                 now_time = time.time()
-                draw_fps(frame_prep, 1.0 / max(now_time - prev_time, 1e-6))
+                current_fps = 1.0 / max(now_time - prev_time, 1e-6)
                 prev_time = now_time
-                
-                # Vẽ HUD hiển thị bối cảnh VLM
-                if CFG.vlm_enabled:
-                    overlay = frame_prep.copy()
-                    cv2.rectangle(overlay, (10, 30), (320, 150), (50, 50, 50), -1)
-                    cv2.addWeighted(overlay, 0.6, frame_prep, 0.4, 0, frame_prep)
-                    cv2.putText(frame_prep, "AMBIENT CONTEXT (VLM):", (20, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
-                    cv2.putText(frame_prep, f"Weather: {weather}", (20, 75), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
-                    cv2.putText(frame_prep, f"Activity: {crowd_activity}", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
-                    cv2.putText(frame_prep, f"Objects: {', '.join(ctx.objects)}", (20, 125), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+
+                # Vẽ toàn bộ HUD trực quan (Person, Pet, Ambient Context VLM, FPS)
+                draw_tracking_hud(
+                    frame_prep,
+                    metas=metas,
+                    pets=res.pets,
+                    context=ctx if CFG.vlm_enabled else None,
+                    fps=current_fps,
+                )
                 
                 # Hiển thị màn hình trực quan thời gian thực
                 cv2.imshow("Video Test Overlay (Press 'q' to Quit)", frame_prep)

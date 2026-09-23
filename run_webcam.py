@@ -19,8 +19,7 @@ import numpy as np
 
 from configs import CFG, OUTPUTS_DIR
 from pipeline import Pipeline
-from preprocess import preprocess
-from viz import draw_person, draw_fps
+from viz import draw_tracking_hud
 
 
 def create_mock_frame(t: float) -> np.ndarray:
@@ -227,62 +226,22 @@ def main() -> None:
                     time.sleep(0.005)
                     continue
 
-            # Tiền xử lý
-            frame_prep = preprocess(frame)
-            metas = pipe.process(frame_prep, source_frame=frame)
-            for m in metas:
-                draw_person(frame_prep, m)
+            # Xử lý toàn bộ luồng AI và tiền xử lý (Single Source of Truth)
+            res = pipe.process_frame(frame, source_frame=frame)
+            frame_prep = res.processed_frame
 
             now = time.time()
-            draw_fps(frame_prep, 1.0 / max(now - prev, 1e-6))
+            current_fps = 1.0 / max(now - prev, 1e-6)
             prev = now
 
-            # Vẽ bảng bối cảnh VLM nếu bật
-            if CFG.vlm_enabled:
-                context = pipe.latest_context
-                overlay = frame_prep.copy()
-                cv2.rectangle(overlay, (10, 30), (320, 150), (50, 50, 50), -1)
-                cv2.addWeighted(overlay, 0.6, frame_prep, 0.4, 0, frame_prep)
-                cv2.putText(
-                    frame_prep,
-                    "AMBIENT CONTEXT (VLM):",
-                    (20, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.45,
-                    (0, 255, 255),
-                    1,
-                    cv2.LINE_AA,
-                )
-                cv2.putText(
-                    frame_prep,
-                    f"Weather: {context.weather}",
-                    (20, 75),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.45,
-                    (255, 255, 255),
-                    1,
-                    cv2.LINE_AA,
-                )
-                cv2.putText(
-                    frame_prep,
-                    f"Activity: {context.crowd_activity}",
-                    (20, 100),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.45,
-                    (255, 255, 255),
-                    1,
-                    cv2.LINE_AA,
-                )
-                cv2.putText(
-                    frame_prep,
-                    f"Objects: {', '.join(context.objects)}",
-                    (20, 125),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.45,
-                    (255, 255, 255),
-                    1,
-                    cv2.LINE_AA,
-                )
+            # Vẽ trực quan HUD toàn diện (Person, Pet, Ambient Context VLM, FPS)
+            draw_tracking_hud(
+                frame_prep,
+                metas=res.metas,
+                pets=res.pets,
+                context=res.context if CFG.vlm_enabled else None,
+                fps=current_fps,
+            )
 
             window_name = "tracking-cv (webcam - Demo)"
             if use_mock:
@@ -311,12 +270,19 @@ def main() -> None:
             out_csv.parent.mkdir(exist_ok=True)
             import csv
 
-            fields = ["track_id", "age_group", "gender"]
+            fields = ["track_id", "age", "age_group", "gender"]
             with open(out_csv, "w", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow(fields)
-                for tid, (age_grp, g) in pipe._age_cache.items():
-                    writer.writerow([tid, age_grp, g])
+                for tid, val in pipe._age_cache.items():
+                    if isinstance(val, (tuple, list)) and len(val) == 3:
+                        age, age_grp, g = val
+                    elif isinstance(val, (tuple, list)) and len(val) == 2:
+                        age_grp, g = val
+                        age = None
+                    else:
+                        age, age_grp, g = None, None, None
+                    writer.writerow([tid, age, age_grp, g])
             print(f"Saved live webcam session report to: {out_csv}")
 
 
