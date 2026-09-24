@@ -6,6 +6,7 @@ never needs to know what's inside.
 
 from __future__ import annotations
 
+import threading
 import time
 from dataclasses import dataclass, asdict
 
@@ -77,6 +78,11 @@ class Pipeline:
         self._ag_executor = ThreadPoolExecutor(max_workers=1)
         self._ag_in_flight: set[int] = set()
         self._pose_cache: dict[int, HeadPose] = {}
+        # Which scene the age worker's result belongs to. reset() bumps it, so an
+        # estimate still in flight from the previous clip is dropped instead of
+        # landing on a track_id the new clip has already reused.
+        self._ag_epoch = 0
+        self._ag_lock = threading.Lock()
 
     def reset(self) -> None:
         """Forget every per-track identity and start counting from scratch.
@@ -88,12 +94,14 @@ class Pipeline:
         self.tracker.reset()
         self.dwell = DwellTracker()
         self._frame_idx = 0
-        self._ag_samples.clear()
-        self._age_cache.clear()
+        with self._ag_lock:
+            self._ag_epoch += 1
+            self._ag_samples.clear()
+            self._age_cache.clear()
+            self._ag_in_flight.clear()
         self._clothing_cache.clear()
         self._track_frames.clear()
         self._last_seen.clear()
-        self._ag_in_flight.clear()
         self._pose_cache.clear()
         self.latest_pets.clear()
 
@@ -104,8 +112,12 @@ class Pipeline:
     def stop(self):
         if self.vlm:
             self.vlm.stop()
-        if hasattr(self, "_ag_executor"):
-            self._ag_executor.shutdown(wait=False)
+        # shutdown(wait=False) returns while a worker may still be mid-inference,
+        # so retire the epoch too: its result lands after the caller considers
+        # the pipeline finished and must not be written.
+        with self._ag_lock:
+            self._ag_epoch += 1
+        self._ag_executor.shutdown(wait=False)
 
     @property
     def latest_context(self):
@@ -153,17 +165,19 @@ class Pipeline:
         x1, y1, x2, y2 = bbox
         return crop_face(source_frame, (int(x1 * sx), int(y1 * sy), int(x2 * sx), int(y2 * sy)))
 
-    def _async_estimate(self, track_id: int, face_bgr: np.ndarray) -> None:
+    def _async_estimate(self, track_id: int, face_bgr: np.ndarray, epoch: int) -> None:
         """Run heavyweight MiVOLO ONNX inference in background worker thread."""
         try:
             ag = self.age_gender.estimate(face_bgr, track_id)
+        except Exception:
+            ag = None
+        with self._ag_lock:
+            if epoch != self._ag_epoch:
+                return  # a different clip owns this track_id now
             if ag is not None:
                 samples = self._ag_samples.setdefault(track_id, [])
                 samples.append((ag, int(face_bgr.shape[0])))
                 self._age_cache[track_id] = self._reduce_votes(samples)
-        except Exception:
-            pass
-        finally:
             self._ag_in_flight.discard(track_id)
 
     def _age_gender_voted(self, track_id: int, face_bgr: np.ndarray) -> tuple[int | None, str | None, str | None]:
@@ -175,8 +189,10 @@ class Pipeline:
                 and self._frame_idx % self.cfg.age_gender_every_n == 0)
         )
         if due and track_id not in self._ag_in_flight and face_bgr is not None and face_bgr.size > 0:
-            self._ag_in_flight.add(track_id)
-            self._ag_executor.submit(self._async_estimate, track_id, face_bgr.copy())
+            with self._ag_lock:
+                self._ag_in_flight.add(track_id)
+                epoch = self._ag_epoch
+            self._ag_executor.submit(self._async_estimate, track_id, face_bgr.copy(), epoch)
 
         return self._age_cache.get(track_id, (None, None, None))
 
@@ -199,9 +215,10 @@ class Pipeline:
             self.dwell.close(track_id, now)
             if now - self._last_seen[track_id] > self.cfg.track_expiry_seconds:
                 self._last_seen.pop(track_id)
-                self._ag_samples.pop(track_id, None)
-                self._age_cache.pop(track_id, None)
-                self._ag_in_flight.discard(track_id)
+                with self._ag_lock:
+                    self._ag_samples.pop(track_id, None)
+                    self._age_cache.pop(track_id, None)
+                    self._ag_in_flight.discard(track_id)
                 self._pose_cache.pop(track_id, None)
                 self._clothing_cache.pop(track_id, None)
                 self._track_frames.pop(track_id, None)
