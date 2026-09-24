@@ -11,14 +11,17 @@ from dataclasses import dataclass, asdict
 
 import numpy as np
 
+from concurrent.futures import ThreadPoolExecutor
 from configs import CFG
 from preprocess import preprocess, to_rgb
 from crop import crop_face
 from tracker import FaceTracker
-from head_pose import HeadPoseEstimator
+from head_pose import HeadPoseEstimator, HeadPose
 from age_gender import AgeGender, AgeGenderEstimator, map_age_group
 from attention import DwellTracker, is_attentive
-from scene_vlm import SceneVLM
+from scene_vlm import SceneVLM, SceneContext
+from pet_tracker import PetTracker, PetDetection
+from clothing_tracker import ClothingTracker, ClothingDetection
 
 
 @dataclass
@@ -33,9 +36,23 @@ class PersonMeta:
     roll: float | None = None
     attention: int = 0
     dwell_time: float = 0.0
+    has_pet: bool = False
+    pet_type: str | None = None       # "dog" | "cat"
+    pet_box: tuple[int, int, int, int] | None = None
+    clothing_color: str | None = None # e.g. "Black", "White", "Blue", "Red"
+    clothing_style: str | None = None # "Formal" | "Sport" | "Casual"
 
     def as_row(self) -> dict:
         return asdict(self)
+
+
+@dataclass
+class TrackingFrameResult:
+    """Consolidated result for a single processed frame (Single Source of Truth)."""
+    metas: list[PersonMeta]
+    pets: list[PetDetection]
+    context: SceneContext
+    processed_frame: np.ndarray | None = None
 
 
 class Pipeline:
@@ -48,10 +65,18 @@ class Pipeline:
         self.age_gender = AgeGenderEstimator()       # Phase 4
         self.dwell = DwellTracker()                  # Phase 5
         self.vlm = SceneVLM() if cfg.vlm_enabled else None  # Phase 6
+        self.pet_tracker = PetTracker(cfg) if getattr(cfg, "pet_enabled", False) else None  # Phase 7
+        self.clothing_tracker = ClothingTracker(cfg) if getattr(cfg, "clothing_enabled", False) else None  # Phase 8
+        self.latest_pets: list[PetDetection] = []
         self._frame_idx = 0
         self._ag_samples: dict[int, list[AgeGender]] = {}   # track_id -> raw votes
         self._age_cache: dict[int, tuple[int | None, str | None, str | None]] = {}    # track_id -> (age, age_group, gender)
+        self._clothing_cache: dict[int, tuple[str, str]] = {}  # track_id -> (color, style)
+        self._track_frames: dict[int, int] = {}  # track_id -> frame_count
         self._last_seen: dict[int, float] = {}
+        self._ag_executor = ThreadPoolExecutor(max_workers=1)
+        self._ag_in_flight: set[int] = set()
+        self._pose_cache: dict[int, HeadPose] = {}
 
     def reset(self) -> None:
         """Forget every per-track identity and start counting from scratch.
@@ -65,7 +90,12 @@ class Pipeline:
         self._frame_idx = 0
         self._ag_samples.clear()
         self._age_cache.clear()
+        self._clothing_cache.clear()
+        self._track_frames.clear()
         self._last_seen.clear()
+        self._ag_in_flight.clear()
+        self._pose_cache.clear()
+        self.latest_pets.clear()
 
     def start(self):
         if self.vlm:
@@ -74,6 +104,8 @@ class Pipeline:
     def stop(self):
         if self.vlm:
             self.vlm.stop()
+        if hasattr(self, "_ag_executor"):
+            self._ag_executor.shutdown(wait=False)
 
     @property
     def latest_context(self):
@@ -121,19 +153,31 @@ class Pipeline:
         x1, y1, x2, y2 = bbox
         return crop_face(source_frame, (int(x1 * sx), int(y1 * sy), int(x2 * sx), int(y2 * sy)))
 
+    def _async_estimate(self, track_id: int, face_bgr: np.ndarray) -> None:
+        """Run heavyweight MiVOLO ONNX inference in background worker thread."""
+        try:
+            ag = self.age_gender.estimate(face_bgr, track_id)
+            if ag is not None:
+                samples = self._ag_samples.setdefault(track_id, [])
+                samples.append((ag, int(face_bgr.shape[0])))
+                self._age_cache[track_id] = self._reduce_votes(samples)
+        except Exception:
+            pass
+        finally:
+            self._ag_in_flight.discard(track_id)
+
     def _age_gender_voted(self, track_id: int, face_bgr: np.ndarray) -> tuple[int | None, str | None, str | None]:
-        """Sample age/gender periodically until enough votes, then hold the result."""
+        """Sample age/gender asynchronously in background without blocking the real-time loop."""
         samples = self._ag_samples.setdefault(track_id, [])
         due = (
             not samples  # always get something on the frame a track first appears
             or (len(samples) < self.cfg.age_gender_samples
                 and self._frame_idx % self.cfg.age_gender_every_n == 0)
         )
-        if due:
-            ag = self.age_gender.estimate(face_bgr, track_id)
-            if ag is not None:
-                samples.append((ag, int(face_bgr.shape[0])))
-                self._age_cache[track_id] = self._reduce_votes(samples)
+        if due and track_id not in self._ag_in_flight and face_bgr is not None and face_bgr.size > 0:
+            self._ag_in_flight.add(track_id)
+            self._ag_executor.submit(self._async_estimate, track_id, face_bgr.copy())
+
         return self._age_cache.get(track_id, (None, None, None))
 
     def _retire(self, live_ids: set[int], now: float) -> None:
@@ -157,6 +201,10 @@ class Pipeline:
                 self._last_seen.pop(track_id)
                 self._ag_samples.pop(track_id, None)
                 self._age_cache.pop(track_id, None)
+                self._ag_in_flight.discard(track_id)
+                self._pose_cache.pop(track_id, None)
+                self._clothing_cache.pop(track_id, None)
+                self._track_frames.pop(track_id, None)
                 self.dwell.forget(track_id)
 
     def process(self, frame_bgr: np.ndarray, now: float | None = None,
@@ -207,7 +255,17 @@ class Pipeline:
                 print(f"      - Bước 3.1: Trích xuất Face Bounding Box {t.bbox} (Kích thước crop: {w_c}x{h_c})")
 
             # Bước 4: Ước lượng hướng xoay đầu 3D (solvePnP)
-            pose = self.head_pose.estimate(face_rgb) if face_rgb is not None else None
+            # Throttle MediaPipe Face Mesh: chạy mỗi 2 frame cho track ổn định để tiết kiệm CPU
+            pose = None
+            if face_rgb is not None:
+                due_pose = (t.track_id not in self._pose_cache) or (self._frame_idx % 2 == 0)
+                if due_pose:
+                    pose = self.head_pose.estimate(face_rgb)
+                    if pose is not None:
+                        self._pose_cache[t.track_id] = pose
+                else:
+                    pose = self._pose_cache.get(t.track_id)
+
             yaw_val = round(pose.yaw, 1) if pose else None
             pitch_val = round(pose.pitch, 1) if pose else None
             if verbose:
@@ -221,6 +279,22 @@ class Pipeline:
             age_str = f"~{approx_age} ({age_group})" if approx_age is not None else (age_group or "Chưa rõ")
             if verbose:
                 print(f"      - Bước 3.3: Phân tích giới tính/tuổi: {gender_vn} ({age_str})")
+
+            # Bước 5.5: Nhận diện màu sắc trang phục & phong cách (Clothing & Style - One-shot)
+            clothing_color, clothing_style = None, None
+            if self.clothing_tracker is not None:
+                tid = t.track_id
+                self._track_frames[tid] = self._track_frames.get(tid, 0) + 1
+                if tid in self._clothing_cache:
+                    clothing_color, clothing_style = self._clothing_cache[tid]
+                elif self._track_frames[tid] >= getattr(self.cfg, "clothing_min_samples", 4):
+                    anal_frame = source_frame if source_frame is not None else frame_bgr
+                    det = self.clothing_tracker.analyze(anal_frame, t.bbox)
+                    if det is not None:
+                        clothing_color, clothing_style = det.color_name, det.style
+                        self._clothing_cache[tid] = (clothing_color, clothing_style)
+                        if verbose:
+                            print(f"      - Bước 3.5: Nhận diện trang phục: Màu {clothing_color} (Phong cách: {clothing_style})")
 
             # Bước 6: Đánh giá trạng thái nhìn (Gaze Attention) & Dwell time
             attentive_now = is_attentive(pose) if pose is not None else False
@@ -240,9 +314,47 @@ class Pipeline:
                     roll=pose.roll if pose else None,
                     attention=int(smoothed_att),
                     dwell_time=dwell_time,
+                    clothing_color=clothing_color,
+                    clothing_style=clothing_style,
                 )
             )
+
+        # Bước 7: Nhận diện & theo vết thú cưng (Pet Tracking & Spatial Proximity)
+        if self.pet_tracker is not None:
+            self.latest_pets = self.pet_tracker.update(frame_bgr, metas)
+        else:
+            self.latest_pets = []
+
         return metas
+
+    def process_frame(
+        self,
+        frame: np.ndarray,
+        now: float | None = None,
+        source_frame: np.ndarray | None = None,
+        verbose: bool = False,
+    ) -> TrackingFrameResult:
+        """High-level processing method that applies preprocessing and runs the entire AI pipeline.
+
+        Args:
+            frame: Input image (raw BGR, will be preprocessed to pipeline dimensions).
+            now: Monotonic timestamp for dwell smoothing.
+            source_frame: Optional higher-res frame for crops (e.g. MiVOLO / clothing).
+            verbose: If True, prints stage logs.
+
+        Returns:
+            TrackingFrameResult encapsulating people metadata, detected pets, ambient scene context,
+            and preprocessed frame.
+        """
+        frame_prep = preprocess(frame)
+        src = source_frame if source_frame is not None else frame
+        metas = self.process(frame_prep, now=now, source_frame=src)
+        return TrackingFrameResult(
+            metas=metas,
+            pets=self.latest_pets,
+            context=self.latest_context,
+            processed_frame=frame_prep,
+        )
 
 
 

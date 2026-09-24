@@ -19,8 +19,7 @@ import numpy as np
 
 from configs import CFG, OUTPUTS_DIR
 from pipeline import Pipeline
-from preprocess import preprocess
-from viz import draw_person, draw_fps
+from viz import draw_tracking_hud
 
 
 def create_mock_frame(t: float) -> np.ndarray:
@@ -227,62 +226,22 @@ def main() -> None:
                     time.sleep(0.005)
                     continue
 
-            # Tiền xử lý
-            frame_prep = preprocess(frame)
-            metas = pipe.process(frame_prep, source_frame=frame)
-            for m in metas:
-                draw_person(frame_prep, m)
+            # Xử lý toàn bộ luồng AI và tiền xử lý (Single Source of Truth)
+            res = pipe.process_frame(frame, source_frame=frame)
+            frame_prep = res.processed_frame
 
             now = time.time()
-            draw_fps(frame_prep, 1.0 / max(now - prev, 1e-6))
+            current_fps = 1.0 / max(now - prev, 1e-6)
             prev = now
 
-            # Vẽ bảng bối cảnh VLM nếu bật
-            if CFG.vlm_enabled:
-                context = pipe.latest_context
-                overlay = frame_prep.copy()
-                cv2.rectangle(overlay, (10, 30), (320, 150), (50, 50, 50), -1)
-                cv2.addWeighted(overlay, 0.6, frame_prep, 0.4, 0, frame_prep)
-                cv2.putText(
-                    frame_prep,
-                    "AMBIENT CONTEXT (VLM):",
-                    (20, 50),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.45,
-                    (0, 255, 255),
-                    1,
-                    cv2.LINE_AA,
-                )
-                cv2.putText(
-                    frame_prep,
-                    f"Weather: {context.weather}",
-                    (20, 75),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.45,
-                    (255, 255, 255),
-                    1,
-                    cv2.LINE_AA,
-                )
-                cv2.putText(
-                    frame_prep,
-                    f"Activity: {context.crowd_activity}",
-                    (20, 100),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.45,
-                    (255, 255, 255),
-                    1,
-                    cv2.LINE_AA,
-                )
-                cv2.putText(
-                    frame_prep,
-                    f"Objects: {', '.join(context.objects)}",
-                    (20, 125),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.45,
-                    (255, 255, 255),
-                    1,
-                    cv2.LINE_AA,
-                )
+            # Vẽ trực quan HUD toàn diện (Person, Pet, Ambient Context VLM, FPS)
+            draw_tracking_hud(
+                frame_prep,
+                metas=res.metas,
+                pets=res.pets,
+                context=res.context if CFG.vlm_enabled else None,
+                fps=current_fps,
+            )
 
             window_name = "tracking-cv (webcam - Demo)"
             if use_mock:

@@ -76,9 +76,9 @@ class FaceDetector:
                 if len(results) > 0 and results[0].boxes is not None:
                     boxes = results[0].boxes
                     for box in boxes:
-                        xyxy = box.xyxy[0].cpu().numpy()
+                        xyxy = box.xyxy[0].float().cpu().numpy()
                         x1, y1, x2, y2 = map(int, xyxy)
-                        conf = float(box.conf[0].cpu().item())
+                        conf = float(box.conf[0].float().cpu().item())
                         detections.append(Detection(bbox=(x1, y1, x2, y2), confidence=conf))
             except Exception as e:
                 print(f"[Detector] Lỗi suy luận YOLOv8-face ({e}). Chuyển sang chạy MediaPipe.")

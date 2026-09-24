@@ -12,7 +12,7 @@ import {
   IconVideo,
 } from "@/components/icons/Icons";
 import { CustomSelect } from "@/components/CustomSelect";
-import { AGE_OPTIONS, ANY, CATEGORY_OPTIONS, CROWD_OPTIONS, GENDER_OPTIONS, WEATHER_OPTIONS, labelFor } from "@/lib/taxonomy";
+import { AGE_OPTIONS, ANY, CATEGORY_OPTIONS, CROWD_OPTIONS, GENDER_OPTIONS, PET_OPTIONS, STYLE_OPTIONS, WEATHER_OPTIONS, labelFor } from "@/lib/taxonomy";
 
 interface UploadMediaModalProps {
   isOpen: boolean;
@@ -27,6 +27,8 @@ type Targeting = {
   target_gender: string;
   target_crowd: string;
   target_weather: string;
+  target_pet?: string;
+  target_style?: string;
 };
 
 /** A file waiting to be uploaded, with the targeting that will go up with it.
@@ -41,6 +43,8 @@ const DEFAULT_TARGET: Targeting = {
   target_gender: ANY,
   target_crowd: ANY,
   target_weather: ANY,
+  target_pet: ANY,
+  target_style: ANY,
 };
 
 /** One line summarising a file's targeting, for the row under its name.
@@ -52,6 +56,8 @@ function targetSummary(t: Targeting): string {
     t.target_gender !== ANY ? labelFor(GENDER_OPTIONS, t.target_gender) : null,
     t.target_crowd !== ANY ? labelFor(CROWD_OPTIONS, t.target_crowd).split(" (")[0] : null,
     t.target_weather !== ANY ? labelFor(WEATHER_OPTIONS, t.target_weather) : null,
+    t.target_pet && t.target_pet !== ANY ? labelFor(PET_OPTIONS, t.target_pet).split(" (")[0] : null,
+    t.target_style && t.target_style !== ANY ? labelFor(STYLE_OPTIONS, t.target_style).split(" (")[0] : null,
   ].filter(Boolean);
   return parts.length ? parts.join(" · ") : "Mọi khán giả";
 }
@@ -498,6 +504,22 @@ export function UploadMediaModal({
                   value={editing?.target.target_weather ?? ANY}
                   onChange={(v) => patchTarget({ target_weather: v })}
                   options={WEATHER_OPTIONS}
+                  disabled={!editing || uploading}
+                />
+
+                <CustomSelect
+                  label="Thú cưng đi kèm"
+                  value={editing?.target.target_pet ?? ANY}
+                  onChange={(v) => patchTarget({ target_pet: v })}
+                  options={PET_OPTIONS}
+                  disabled={!editing || uploading}
+                />
+
+                <CustomSelect
+                  label="Phong cách trang phục"
+                  value={editing?.target.target_style ?? ANY}
+                  onChange={(v) => patchTarget({ target_style: v })}
+                  options={STYLE_OPTIONS}
                   disabled={!editing || uploading}
                 />
 

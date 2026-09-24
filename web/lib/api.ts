@@ -6,12 +6,7 @@
  * shows up as an empty dashboard rather than a build error.
  */
 
-export const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE !== undefined
-    ? process.env.NEXT_PUBLIC_API_BASE
-    : typeof window !== "undefined"
-      ? ""
-      : "http://127.0.0.1:8000";
+export const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "";
 
 export function mediaUrl(url: string): string {
   if (url.startsWith("http")) return url;
@@ -42,6 +37,9 @@ export type Creative = {
   target_gender: string;
   target_crowd: string;
   target_weather: string;
+  target_pet?: string;
+  target_clothing?: string;
+  target_style?: string;
   category: string;
   description: string;
 };
@@ -106,6 +104,11 @@ export type AdRecommendation = {
   people_count?: number;
   scene_weather?: string | null;
   scene_objects?: string[];
+  has_pet?: boolean;
+  pet_type?: string | null;
+  scene_pets?: string[];
+  clothing_color?: string | null;
+  clothing_style?: string | null;
   reason: string;
 };
 
@@ -150,6 +153,24 @@ export type ScreenPublic = {
   account_username?: string | null;
 };
 
+export type AdDecisionLog = {
+  timestamp: string;
+  creative_id: number;
+  creative_name: string;
+  duration: number;
+  mode: "smart_targeting" | "rotation" | "manual";
+  match_score?: number | null;
+  audience_summary?: string | null;
+  reason?: string | null;
+};
+
+export type TargetingSettings = {
+  smart_targeting: boolean;
+  cut_in_enabled: boolean;
+  cut_in_min_playback: number;
+  lookahead_seconds: number;
+};
+
 export type NowPlaying = {
   airing_id: number | null;
   creative: Creative | null;
@@ -157,6 +178,11 @@ export type NowPlaying = {
   elapsed: number;
   remaining: number;
   playing: boolean;
+  ad_logs?: AdDecisionLog[];
+  smart_targeting?: boolean;
+  cut_in_enabled?: boolean;
+  cut_in_min_playback?: number;
+  lookahead_seconds?: number;
 };
 
 export type LiveTrack = {
@@ -169,6 +195,16 @@ export type LiveTrack = {
   pitch: number | null;
   attention: number;
   dwell_time: number;
+  has_pet?: boolean;
+  pet_type?: string | null;
+  clothing_color?: string | null;
+  clothing_style?: string | null;
+};
+
+export type AmbientContext = {
+  weather: string | null;
+  crowd_activity: string | null;
+  objects: string[];
 };
 
 export type LiveStats = {
@@ -184,6 +220,7 @@ export type LiveStats = {
   now_playing: NowPlaying | null;
   tracks: LiveTrack[];
   recommendation?: AdRecommendation | null;
+  ambient_context?: AmbientContext | null;
   smart_targeting?: boolean;
   error: string | null;
 };
@@ -266,6 +303,10 @@ export type TrackingSessionTrack = {
   gender: string | null;
   age: number | null;
   age_group: string | null;
+  has_pet?: boolean;
+  pet_type?: string | null;
+  clothing_color?: string | null;
+  clothing_style?: string | null;
 };
 
 export type TrackingSessionPublic = {
@@ -474,6 +515,9 @@ export const api = {
       target_gender?: string;
       target_crowd?: string;
       target_weather?: string;
+      target_pet?: string;
+      target_clothing?: string;
+      target_style?: string;
       category?: string;
       description?: string;
       add_to_playlist?: boolean;
@@ -486,6 +530,9 @@ export const api = {
     if (meta?.target_gender) form.append("target_gender", meta.target_gender);
     if (meta?.target_crowd) form.append("target_crowd", meta.target_crowd);
     if (meta?.target_weather) form.append("target_weather", meta.target_weather);
+    if (meta?.target_pet) form.append("target_pet", meta.target_pet);
+    if (meta?.target_clothing) form.append("target_clothing", meta.target_clothing);
+    if (meta?.target_style) form.append("target_style", meta.target_style);
     if (meta?.category) form.append("category", meta.category);
     if (meta?.description) form.append("description", meta.description);
     if (meta?.add_to_playlist !== undefined) {
@@ -505,6 +552,9 @@ export const api = {
         | "target_gender"
         | "target_crowd"
         | "target_weather"
+        | "target_pet"
+        | "target_clothing"
+        | "target_style"
         | "category"
         | "description"
       >
@@ -530,6 +580,12 @@ export const api = {
     request<{ enabled: boolean }>("/api/ads/smart-targeting", {
       method: "POST",
       body: JSON.stringify({ enabled }),
+    }),
+  getTargetingSettings: () => request<TargetingSettings>("/api/ads/targeting-settings"),
+  setTargetingSettings: (settings: Partial<TargetingSettings>) =>
+    request<TargetingSettings>("/api/ads/targeting-settings", {
+      method: "POST",
+      body: JSON.stringify(settings),
     }),
   reorderAds: (creative_ids: number[]) =>
     request<Creative[]>("/api/ads/order", { method: "PUT", body: JSON.stringify({ creative_ids }) }),

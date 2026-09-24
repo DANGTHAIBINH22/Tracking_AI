@@ -69,6 +69,23 @@ export const CATEGORY_OPTIONS: string[] = [
   "Đồ chơi & Trẻ em",
 ];
 
+/** Matches PET targeting in server/engine.py. */
+export const PET_OPTIONS: Option[] = [
+  { value: ANY, label: "Mọi trường hợp" },
+  { value: "yes", label: "Có thú cưng đi cùng" },
+  { value: "dog", label: "Dắt theo Chó" },
+  { value: "cat", label: "Dắt theo Mèo" },
+  { value: "none", label: "Không có thú cưng" },
+];
+
+/** Matches STYLE targeting in server/engine.py. */
+export const STYLE_OPTIONS: Option[] = [
+  { value: ANY, label: "Mọi phong cách" },
+  { value: "Formal", label: "Công sở / Lịch sự (Formal)" },
+  { value: "Sport", label: "Thể thao / Năng động (Sport)" },
+  { value: "Casual", label: "Thường ngày (Casual)" },
+];
+
 /** Human label for a stored value; falls back to the raw value so an
  *  unrecognised one is visible rather than blank. */
 export function labelFor(options: Option[], value: string): string {

@@ -12,6 +12,16 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Tự động nạp cấu hình môi trường (.env) trước khi nạp db, settings và các module con
+_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+if _ENV_FILE.is_file():
+    load_dotenv(_ENV_FILE)
+else:
+    load_dotenv()
+
 import asyncio
 from contextlib import asynccontextmanager
 
@@ -31,6 +41,15 @@ async def lifespan(app: FastAPI):
     db.init_db()
     PLAYER.load_state()
     ENGINE.set_event_loop(asyncio.get_running_loop())
+
+    # Khởi tạo trước (Warmup) mô hình Moondream VLM trong luồng nền
+    # giúp server mở port tức thì mà không bị block, đồng thời nạp sẵn model vào RAM/GPU
+    import threading
+    from configs import CFG
+    from scene_vlm import SceneVLM
+    if getattr(CFG, "vlm_enabled", True):
+        threading.Thread(target=SceneVLM.warmup, daemon=True, name="vlm-warmup").start()
+
     yield
     # Both own OS resources (a camera handle, a thread) that a reload would leak.
     ENGINE.stop()

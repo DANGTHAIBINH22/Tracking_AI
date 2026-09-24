@@ -17,16 +17,39 @@ other or leaking a connection per request worker.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any, Iterable
 
+from dotenv import load_dotenv
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    # Matches the default homebrew/docker-compose setup: see README.
-    "postgresql://localhost:5432/signage",
-)
+# Tự động nạp file .env từ thư mục gốc của project hoặc thư mục hiện tại
+_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+if _ENV_FILE.is_file():
+    load_dotenv(_ENV_FILE)
+else:
+    load_dotenv()
+
+
+def _require_database_url() -> str:
+    """Return DATABASE_URL from environment, raising clearly if it is not set.
+
+    Credentials must never live in source code. Copy .env.example to .env,
+    fill in your Neon / Postgres connection string, then start the server.
+    """
+    url = os.environ.get("DATABASE_URL")
+    if not url:
+        raise RuntimeError(
+            "[DB] DATABASE_URL không được cấu hình.\n"
+            "  → Copy file .env.example thành .env\n"
+            "  → Điền DATABASE_URL=postgresql://... vào .env\n"
+            "  → Khởi động lại server"
+        )
+    return url
+
+
+DATABASE_URL = _require_database_url()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS creatives (
@@ -40,6 +63,7 @@ CREATE TABLE IF NOT EXISTS creatives (
     created_at  DOUBLE PRECISION NOT NULL,
     target_age_group TEXT        NOT NULL DEFAULT 'all',
     target_gender    TEXT        NOT NULL DEFAULT 'all',
+    target_pet       TEXT        NOT NULL DEFAULT 'all',
     category         TEXT        NOT NULL DEFAULT 'Chung',
     description      TEXT        NOT NULL DEFAULT ''
 );
@@ -90,7 +114,8 @@ CREATE TABLE IF NOT EXISTS screens (
     location     TEXT,
     status       TEXT NOT NULL DEFAULT 'pending',
     last_seen    DOUBLE PRECISION,
-    created_at   DOUBLE PRECISION NOT NULL
+    created_at   DOUBLE PRECISION NOT NULL,
+    user_id      INTEGER REFERENCES users(id) ON DELETE SET NULL
 );
 CREATE INDEX IF NOT EXISTS idx_screens_code ON screens(pairing_code);
 CREATE INDEX IF NOT EXISTS idx_screens_token ON screens(screen_token);
@@ -143,6 +168,10 @@ CREATE INDEX IF NOT EXISTS idx_sessions_device ON tracking_sessions(device_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON tracking_sessions(started_at DESC);
 """
 
+# Timeout kết nối cơ sở dữ liệu (giây), đủ đáp ứng độ trễ mạng và cold-start của Neon Cloud DB
+DB_TIMEOUT = float(os.environ.get("DB_TIMEOUT", "20.0"))
+DB_INIT_TIMEOUT = float(os.environ.get("DB_INIT_TIMEOUT", "30.0"))
+
 _pool: ConnectionPool | None = None
 
 
@@ -153,8 +182,8 @@ def pool() -> ConnectionPool:
             DATABASE_URL,
             min_size=1,
             max_size=30,
-            timeout=10.0,
-            kwargs={"autocommit": True, "row_factory": dict_row},
+            timeout=DB_TIMEOUT,
+            kwargs={"autocommit": True, "row_factory": dict_row, "connect_timeout": 15},
             open=True,
         )
     return _pool
@@ -164,7 +193,8 @@ def init_db() -> None:
     import time
     from server.auth import hash_password
 
-    with pool().connection(timeout=5.0) as conn:
+    print("[Database] Đang kết nối và đồng bộ cấu trúc cơ sở dữ liệu...")
+    with pool().connection(timeout=DB_INIT_TIMEOUT) as conn:
         conn.execute(SCHEMA)
         conn.execute("""
             ALTER TABLE creatives DROP CONSTRAINT IF EXISTS creatives_kind_check;
@@ -172,8 +202,15 @@ def init_db() -> None:
             ALTER TABLE creatives ADD COLUMN IF NOT EXISTS target_gender TEXT NOT NULL DEFAULT 'all';
             ALTER TABLE creatives ADD COLUMN IF NOT EXISTS target_crowd TEXT NOT NULL DEFAULT 'all';
             ALTER TABLE creatives ADD COLUMN IF NOT EXISTS target_weather TEXT NOT NULL DEFAULT 'all';
+            ALTER TABLE creatives ADD COLUMN IF NOT EXISTS target_pet TEXT NOT NULL DEFAULT 'all';
+            ALTER TABLE creatives ADD COLUMN IF NOT EXISTS target_clothing TEXT NOT NULL DEFAULT 'all';
+            ALTER TABLE creatives ADD COLUMN IF NOT EXISTS target_style TEXT NOT NULL DEFAULT 'all';
             ALTER TABLE creatives ADD COLUMN IF NOT EXISTS category TEXT NOT NULL DEFAULT 'Chung';
             ALTER TABLE creatives ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+            ALTER TABLE impressions ADD COLUMN IF NOT EXISTS has_pet BOOLEAN DEFAULT FALSE;
+            ALTER TABLE impressions ADD COLUMN IF NOT EXISTS pet_type TEXT;
+            ALTER TABLE impressions ADD COLUMN IF NOT EXISTS clothing_color TEXT;
+            ALTER TABLE impressions ADD COLUMN IF NOT EXISTS clothing_style TEXT;
 
             ALTER TABLE playlists ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'default';
             ALTER TABLE playlists ADD COLUMN IF NOT EXISTS aspect_ratio TEXT NOT NULL DEFAULT 'FullHD Nghiêng';
@@ -182,6 +219,8 @@ def init_db() -> None:
             ALTER TABLE playlists ADD COLUMN IF NOT EXISTS publish_status TEXT NOT NULL DEFAULT 'unpublish';
 
             ALTER TABLE screens ADD COLUMN IF NOT EXISTS playlist_id INTEGER REFERENCES playlists(id) ON DELETE SET NULL;
+            ALTER TABLE screens ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+            CREATE INDEX IF NOT EXISTS idx_screens_user_id ON screens(user_id);
             ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS tracks_json TEXT DEFAULT '[]';
 
             -- Rows written before server/audience.py existed carry the CV
@@ -241,18 +280,18 @@ def close_db() -> None:
 
 
 def query(sql: str, params: Iterable[Any] = ()) -> list[dict]:
-    with pool().connection(timeout=5.0) as conn:
+    with pool().connection(timeout=DB_TIMEOUT) as conn:
         return conn.execute(sql, tuple(params)).fetchall()
 
 
 def query_one(sql: str, params: Iterable[Any] = ()) -> dict | None:
-    with pool().connection(timeout=5.0) as conn:
+    with pool().connection(timeout=DB_TIMEOUT) as conn:
         return conn.execute(sql, tuple(params)).fetchone()
 
 
 def execute(sql: str, params: Iterable[Any] = ()) -> None:
     """Run a statement whose result you do not need (UPDATE / DELETE / upsert)."""
-    with pool().connection(timeout=5.0) as conn:
+    with pool().connection(timeout=DB_TIMEOUT) as conn:
         conn.execute(sql, tuple(params))
 
 

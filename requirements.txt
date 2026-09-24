@@ -1,0 +1,28 @@
+# ==============================================================================
+# TẬP PHỤ THUỘC TỔNG THỂ DỰ ÁN SMART STANDEE AI (REQUIREMENTS.TXT)
+# Đồ án Tốt nghiệp: Hệ thống Màn hình Quảng cáo Thông minh (UIT)
+# Môi trường khuyến nghị: Python 3.12 (do MediaPipe chưa hỗ trợ bánh xe Python 3.13)
+# ==============================================================================
+
+# --- 1. Lõi Thị giác máy tính thời gian thực (Real-time Edge CV) ---
+ultralytics>=8.2.0          # YOLOv8-Face và mô hình nhận diện đối tượng COCO
+mediapipe<0.10.14           # Face Mesh 468 landmarks (yêu cầu Python < 3.13)
+opencv-python>=4.10.0       # Xử lý ảnh, bộ lọc CLAHE, OpenCV VideoCapture
+onnxruntime>=1.19.0         # Bộ thực thi ONNX cho mô hình MiVOLO v2 Age & Gender
+lapx>=0.9.4                 # Giải thuật Hungarian cho ByteTrack
+numpy>=2.0.0                # Tính toán ma trận và đại số tuyến tính
+pandas>=2.2.0               # Xử lý dữ liệu bảng và xuất báo cáo CSV
+
+# --- 2. Backend Server & WebSockets (FastAPI + CSDL) ---
+fastapi>=0.115.0            # REST API và WebSocket endpoints
+uvicorn[standard]>=0.30.0   # Máy chủ ASGI hiệu năng cao
+sqlalchemy>=2.0.0           # Quản lý cơ sở dữ liệu ORM (SQLite / PostgreSQL)
+python-multipart>=0.0.9     # Hỗ trợ tải lên video/file form-data
+websockets>=12.0            # Truyền nhận luồng ảnh camera thời gian thực
+
+# --- 3. Nhánh Bối cảnh Môi trường (Vision-Language Model - Tùy chọn) ---
+# Nếu muốn chạy mô hình Moondream2 VLM, bỏ ghi chú các dòng dưới hoặc dùng requirements-vlm.txt:
+# transformers>=4.40.0
+# accelerate>=0.30.0
+# einops>=0.8.0
+# pillow>=10.0.0

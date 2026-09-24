@@ -200,7 +200,7 @@ def list_available_sources() -> list[dict]:
 
 
 @router.post("/upload-test-video")
-async def upload_test_video(file: UploadFile = File(...)) -> dict:
+def upload_test_video(file: UploadFile = File(...)) -> dict:
     """Upload a test video file (e.g. mall footage) into data/ for AI testing."""
     import shutil
     import uuid

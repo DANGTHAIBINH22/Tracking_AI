@@ -25,6 +25,15 @@ from server.settings import MEDIA_DIR, SETTINGS
 router = APIRouter(prefix="/api/playlists", tags=["playlists"])
 
 
+def _invalidate_player_cache() -> None:
+    try:
+        from server.state import PLAYER
+        if PLAYER:
+            PLAYER.invalidate_playlist_cache()
+    except Exception:
+        pass
+
+
 def _to_playlist_item(row: dict) -> PlaylistItemPublic:
     creative_data = {
         "id": row["creative_id"],
@@ -40,6 +49,9 @@ def _to_playlist_item(row: dict) -> PlaylistItemPublic:
         "target_gender": row.get("target_gender") or "all",
         "target_crowd": row.get("target_crowd") or "all",
         "target_weather": row.get("target_weather") or "all",
+        "target_pet": row.get("target_pet") or "all",
+        "target_clothing": row.get("target_clothing") or "all",
+        "target_style": row.get("target_style") or "all",
         "category": row.get("category") or "Chung",
         "description": row.get("description") or "",
     }
@@ -53,6 +65,7 @@ def _to_playlist_item(row: dict) -> PlaylistItemPublic:
     )
 
 
+
 def _get_playlist_items(playlist_id: int) -> list[PlaylistItemPublic]:
     rows = db.query(
         """SELECT pi.id, pi.playlist_id, pi.creative_id, pi.position, pi.duration,
@@ -61,6 +74,7 @@ def _get_playlist_items(playlist_id: int) -> list[PlaylistItemPublic]:
                   c.position AS creative_position, c.enabled AS creative_enabled,
                   c.created_at AS creative_created_at, c.target_age_group,
                   c.target_gender, c.target_crowd, c.target_weather,
+                  c.target_pet, c.target_clothing, c.target_style,
                   c.category, c.description
            FROM playlist_items pi
            JOIN creatives c ON pi.creative_id = c.id
@@ -69,6 +83,7 @@ def _get_playlist_items(playlist_id: int) -> list[PlaylistItemPublic]:
         (playlist_id,),
     )
     return [_to_playlist_item(r) for r in rows]
+
 
 
 def _to_playlist_public(row: dict, load_items: bool = False) -> PlaylistPublic:
@@ -152,6 +167,8 @@ def create_playlist(body: PlaylistCreate) -> PlaylistPublic:
             publish_status,
         ),
     )
+    if body.is_active:
+        _invalidate_player_cache()
     row = db.query_one("SELECT * FROM playlists WHERE id = %s", (new_id,))
     return _to_playlist_public(row, load_items=True)
 
@@ -177,6 +194,7 @@ def update_playlist(playlist_id: int, patch: PlaylistUpdate) -> PlaylistPublic:
     if fields:
         sets = ", ".join(f"{k} = %s" for k in fields)
         db.execute(f"UPDATE playlists SET {sets} WHERE id = %s", (*fields.values(), playlist_id))
+        _invalidate_player_cache()
 
     if "is_active" in fields:
         from server.state import PLAYER
@@ -200,6 +218,7 @@ def delete_playlist(playlist_id: int) -> None:
         raise HTTPException(404, "Không tìm thấy playlist")
     was_active = bool(row.get("is_active", False))
     db.execute("DELETE FROM playlists WHERE id = %s", (playlist_id,))
+    _invalidate_player_cache()
 
     from server.state import PLAYER
     if was_active:
@@ -250,6 +269,9 @@ def activate_playlist(playlist_id: int, body: PlaylistActivateRequest | None = N
         else:
             db.execute("UPDATE screens SET playlist_id = NULL WHERE playlist_id = %s", (playlist_id,))
 
+    # Invalidate cached playlist so next query reads newly activated/deactivated playlist
+    _invalidate_player_cache()
+
     # Wake player if currently playing
     from server.state import PLAYER
     if not PLAYER.is_playing:
@@ -270,6 +292,7 @@ def deactivate_playlist(playlist_id: int) -> PlaylistPublic:
 
     db.execute("UPDATE playlists SET is_active = FALSE WHERE id = %s", (playlist_id,))
     db.execute("UPDATE screens SET playlist_id = NULL WHERE playlist_id = %s", (playlist_id,))
+    _invalidate_player_cache()
 
     from server.state import PLAYER
     has_active = db.query_one("SELECT id FROM playlists WHERE is_active = TRUE LIMIT 1")
@@ -306,6 +329,7 @@ def add_item_to_playlist(playlist_id: int, body: PlaylistItemAdd) -> PlaylistPub
            VALUES (%s, %s, %s, %s) RETURNING id""",
         (playlist_id, body.creative_id, pos, duration),
     )
+    _invalidate_player_cache()
 
     return _to_playlist_public(pl_row, load_items=True)
 
@@ -318,6 +342,7 @@ def remove_item_from_playlist(playlist_id: int, item_id: int) -> PlaylistPublic:
         raise HTTPException(404, "Không tìm thấy playlist")
 
     db.execute("DELETE FROM playlist_items WHERE id = %s AND playlist_id = %s", (item_id, playlist_id))
+    _invalidate_player_cache()
 
     if pl_row.get("is_active"):
         from server.state import PLAYER
@@ -345,6 +370,7 @@ def reorder_playlist_items(playlist_id: int, order: PlaylistItemOrder) -> Playli
             "UPDATE playlist_items SET position = %s WHERE id = %s AND playlist_id = %s",
             (position, item_id, playlist_id),
         )
+    _invalidate_player_cache()
 
     return _to_playlist_public(pl_row, load_items=True)
 
@@ -361,6 +387,7 @@ def update_playlist_item(playlist_id: int, item_id: int, duration: float) -> Pla
             "UPDATE playlist_items SET duration = %s WHERE id = %s AND playlist_id = %s",
             (duration, item_id, playlist_id),
         )
+        _invalidate_player_cache()
 
     return _to_playlist_public(pl_row, load_items=True)
 
@@ -374,6 +401,9 @@ async def upload_to_playlist(
     target_gender: str = Form("all"),
     target_crowd: str = Form("all"),
     target_weather: str = Form("all"),
+    target_pet: str = Form("all"),
+    target_clothing: str = Form("all"),
+    target_style: str = Form("all"),
     category: str = Form("Chung"),
     description: str = Form(""),
     duration: float | None = Form(None),
@@ -409,8 +439,10 @@ async def upload_to_playlist(
 
     new_creative_id = db.insert(
         """INSERT INTO creatives (name, filename, kind, duration, position, enabled, created_at,
-                                  target_age_group, target_gender, target_crowd, target_weather, category, description)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                                  target_age_group, target_gender, target_crowd, target_weather,
+                                  target_pet, target_clothing, target_style,
+                                  category, description)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
         (
             display_name,
             stored,
@@ -424,6 +456,9 @@ async def upload_to_playlist(
             target_gender,
             target_crowd,
             target_weather,
+            target_pet,
+            target_clothing,
+            target_style,
             category,
             description,
         ),
@@ -438,6 +473,8 @@ async def upload_to_playlist(
            VALUES (%s, %s, %s, %s) RETURNING id""",
         (playlist_id, new_creative_id, max_item_pos, item_dur),
     )
+    _invalidate_player_cache()
 
     return _to_playlist_public(pl_row, load_items=True)
+
 
