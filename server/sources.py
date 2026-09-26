@@ -1,8 +1,9 @@
 """Where frames come from, behind one interface the engine can pull on.
 
-Two sources, one contract:
+Three sources, one contract:
 
     LocalCameraSource   cv2.VideoCapture — the API host's own webcam or a file
+    PlaylistSource      several files back to back, for an unattended test run
     BrowserSource       JPEG frames pushed in from a browser over /ws/ingest
 
 The point of the abstraction is that `AnalyticsEngine` keeps exactly one thread
@@ -125,6 +126,85 @@ class LocalCameraSource:
             self._cap.release()
             self._cap = None
         self._latest_frame = None
+
+
+class PlaylistSource:
+    """Several video files played back to back, behind the single-source contract.
+
+    Same shape as LocalCameraSource, so the engine cannot tell the difference —
+    which is the point: one capture thread, one Pipeline, whatever is feeding it.
+
+    The trick is `rewind()`. The engine already calls it at end-of-file and, when
+    it returns True, flushes the open impressions and calls `Pipeline.reset()`
+    before continuing. That reset is exactly what a clip change needs and is not
+    optional: ByteTrack associates across frames, so without it the last person
+    in clip A and the first person in clip B become one track id, merging two
+    strangers into one viewer with a nonsense dwell time. So advancing the
+    playlist here rides on the existing rewind path rather than adding a second
+    one the engine would have to know about.
+
+    Wraps around at the end. A finite queue that stops would leave the engine
+    idle with `running` still true, which looks identical to a camera that has
+    frozen.
+    """
+
+    SEPARATOR = "|"
+
+    def __init__(self, specs: list[str]) -> None:
+        self.specs = [s.strip() for s in specs if s and s.strip()]
+        if not self.specs:
+            raise ValueError("PlaylistSource cần ít nhất một đường dẫn video")
+        self.spec = self.SEPARATOR.join(self.specs)
+        self.is_file = True
+        self._index = 0
+        self._current: LocalCameraSource | None = None
+
+    @property
+    def current_spec(self) -> str:
+        return self.specs[self._index]
+
+    def open(self) -> None:
+        self._open_current()
+
+    def _open_current(self) -> None:
+        if self._current is not None:
+            self._current.release()
+        self._current = LocalCameraSource(self.specs[self._index])
+        self._current.open()
+
+    @property
+    def native_fps(self) -> float | None:
+        return self._current.native_fps if self._current else None
+
+    def read(self) -> tuple[bool, np.ndarray | None]:
+        if self._current is None:
+            return False, None
+        return self._current.read()
+
+    def rewind(self) -> bool:
+        """Advance to the next clip. Named for the contract, not the behaviour."""
+        self._index = (self._index + 1) % len(self.specs)
+        try:
+            self._open_current()
+        except RuntimeError:
+            # One unreadable clip must not end the run: skip past it. Every clip
+            # failing would spin, so give up once we are back where we started.
+            start = self._index
+            while True:
+                self._index = (self._index + 1) % len(self.specs)
+                if self._index == start:
+                    return False
+                try:
+                    self._open_current()
+                    return True
+                except RuntimeError:
+                    continue
+        return True
+
+    def release(self) -> None:
+        if self._current is not None:
+            self._current.release()
+            self._current = None
 
 
 class BrowserSource:

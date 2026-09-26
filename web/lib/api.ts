@@ -99,7 +99,7 @@ export type AdRecommendation = {
   match_score: number;
   viewer_age_group: string | null;
   viewer_gender: string | null;
-  viewer_approx_age: number | null;
+  viewer_approx_age: number | null;   // whole years
   crowd_context?: string | null;
   people_count?: number;
   scene_weather?: string | null;
@@ -271,7 +271,11 @@ export type IngestStatus = {
 
 export type CaptureState = {
   running: boolean;
+  /** The whole queue, "|"-joined, when several clips are running back to back. */
   source: string | null;
+  /** The clip in that queue the engine is on right now. */
+  source_now?: string | null;
+  queue?: string[] | null;
   mode: "server" | "browser";
   fps: number;
   error: string | null;
@@ -331,7 +335,7 @@ export type TrackingSessionPublic = {
   female_count: number;
   unknown_gender_count: number;
   age_breakdown: Record<string, number>;
-  avg_age: number | null;
+  avg_age: number | null;   // whole years
   avg_presence_seconds: number;
   impressions_per_minute: number;
   notes: string;
@@ -416,14 +420,30 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getAuthToken();
   const authHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
 
-  const res = await fetch(`${API_BASE}${path}`, {
-    ...init,
-    headers:
-      init?.body instanceof FormData
-        ? { ...authHeaders, ...(init?.headers ?? {}) }
-        : { "Content-Type": "application/json", ...authHeaders, ...(init?.headers ?? {}) },
-    cache: "no-store",
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}${path}`, {
+      ...init,
+      headers:
+        init?.body instanceof FormData
+          ? { ...authHeaders, ...(init?.headers ?? {}) }
+          : { "Content-Type": "application/json", ...authHeaders, ...(init?.headers ?? {}) },
+      cache: "no-store",
+    });
+  } catch (err) {
+    // The API being down is the most common failure in development, and it is
+    // the one fetch reports worst: it rejects before any of the status handling
+    // below, so the operator gets a bare "TypeError: Failed to fetch" and a
+    // stack trace pointing into this file rather than at the stopped server.
+    // API_BASE can legitimately be "" (same-origin), and this may run during
+    // SSR, so window is not safe to reach for unguarded.
+    const where =
+      API_BASE || (typeof window !== "undefined" ? window.location.origin : "same-origin");
+    throw new Error(
+      `Không kết nối được API tại ${where} — kiểm tra server đã chạy chưa ` +
+        `(./run_web.sh). Chi tiết: ${(err as Error).message}`,
+    );
+  }
   if (!res.ok) {
     // FastAPI puts the human-readable reason in `detail`; surfacing it beats a
     // bare "500" when the real problem is "camera 0 is already in use".
@@ -673,17 +693,27 @@ export const api = {
 
   captureState: () => request<CaptureState>("/api/capture/state"),
   captureConfig: () => request<CaptureConfig>("/api/capture/config"),
-  captureStart: (source?: string, deviceId?: string | number, screenId?: number) =>
+  /** `sources` queues several clips back to back and takes precedence over
+   *  `source`; the engine resets the tracker at every clip boundary. */
+  captureStart: (
+    source?: string,
+    deviceId?: string | number,
+    screenId?: number,
+    sources?: string[],
+  ) =>
     request<CaptureState>("/api/capture/start", {
       method: "POST",
       body: JSON.stringify({
         source: source || null,
+        sources: sources && sources.length > 0 ? sources : null,
         device_id: deviceId !== undefined && deviceId !== null ? String(deviceId) : null,
         screen_id: screenId || null,
       }),
     }),
   captureStop: () => request<CaptureState>("/api/capture/stop", { method: "POST" }),
-  captureSources: () => request<{ value: string; label: string; type: string; description?: string }[]>("/api/capture/sources"),
+  // `group` is "" for the presets and the loose clips in data/, or a folder
+  // heading for a named set such as data/age_kids.
+  captureSources: () => request<{ value: string; label: string; type: string; group?: string; description?: string }[]>("/api/capture/sources"),
   uploadTestVideo: async (file: File): Promise<{ source: string; filename: string; message: string }> => {
     const fd = new FormData();
     fd.append("file", file);

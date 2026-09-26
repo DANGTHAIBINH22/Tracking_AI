@@ -117,12 +117,20 @@ export function AgeDistributionBarChart({
   data: Record<string, number>;
 }) {
   const mounted = useMounted();
+  // The legacy "<18" row is kept separate rather than folded into one of the
+  // three brackets that replaced it: those impressions were measured when the
+  // model could not tell a toddler from a teenager, and merging them anywhere
+  // would state a precision that was never recorded. It only appears while old
+  // rows are still inside the reporting window.
   const chartData = [
-    { group: "<18", label: "Dưới 18", count: data["<18"] || 0 },
+    { group: "<6", label: "Dưới 6", count: data["<6"] || 0 },
+    { group: "6-13", label: "6 - 13", count: data["6-13"] || 0 },
+    { group: "13-18", label: "13 - 18", count: data["13-18"] || 0 },
     { group: "18-35", label: "18 - 35", count: (data["18-35"] || 0) + (data["18-24"] || 0) + (data["25-34"] || 0) },
     { group: "35-55", label: "35 - 55", count: (data["35-55"] || 0) + (data["35-50"] || 0) },
     { group: ">55", label: "Trên 55", count: data[">55"] || 0 },
-  ];
+    { group: "<18", label: "Dưới 18 (cũ)", count: data["<18"] || 0 },
+  ].filter((d) => d.group !== "<18" || d.count > 0);
 
   const total = chartData.reduce((sum, item) => sum + item.count, 0);
 

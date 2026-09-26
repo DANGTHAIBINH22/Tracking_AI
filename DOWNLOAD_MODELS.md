@@ -10,7 +10,8 @@ Tài liệu này hướng dẫn chi tiết cách chuẩn bị các tệp trọng
 | :--- | :--- | :--- | :--- | :--- |
 | **YOLOv8-Face** | `yolov8n-face.pt` | ~6.1 MB | `models/yolov8n-face.pt` | Phát hiện khuôn mặt (Face Detection) |
 | **YOLOv8n (COCO)** | `yolov8n.pt` | ~6.2 MB | `models/yolov8n.pt` | Phát hiện Thú cưng (Chó, Mèo) và ghép cặp không gian |
-| **MiVOLO v2 ONNX** | `mivolo_age_gender.onnx` + `mivolo_age_gender.onnx.data` | ~112.5 MB | `models/` | Ước lượng Tuổi & Giới tính từ vùng mặt |
+| **MiVOLO v2 (Lagenda)** | `mivolo_v2_lagenda.pth.tar` | ~115 MB | `models/mivolo_v2_lagenda.pth.tar` | Ước lượng Tuổi & Giới tính từ vùng mặt (**mặc định**, tuổi 0-122) |
+| **MiVOLO ONNX (tuỳ chọn)** | `mivolo_age_gender.onnx` | ~92.2 MB | `models/mivolo_age_gender.onnx` | Đường dẫn ONNX thay thế — xem cảnh báo ở mục 3 |
 | **Moondream VLM** | `vikhyat/moondream2` | ~1.6 GB | Cache mặc định (`~/.cache/huggingface`) | Nhận diện bối cảnh (Thời tiết, Đám đông, Vật thể) |
 
 *Lưu ý: Tất cả các tệp trong thư mục `models/` đã được cấu hình tự động bỏ qua (ignored) bởi Git để tránh làm nặng kho lưu trữ mã nguồn.*
@@ -60,18 +61,45 @@ Script sẽ tự động:
 
 ---
 
-### 3. MiVOLO v2 ONNX (`mivolo_age_gender.onnx` & `mivolo_age_gender.onnx.data`)
-Mô hình MiVOLO v2 đã được xuất sẵn thành 2 tệp nhị phân đi liền nhau:
-*   `models/mivolo_age_gender.onnx` (~2.5 MB): Chứa đồ thị tính toán mạng (Graph Definition).
-*   `models/mivolo_age_gender.onnx.data` (~110 MB): Chứa toàn bộ trọng số nhị phân (Weights Data).
+### 3. MiVOLO v2 — Lagenda (`mivolo_v2_lagenda.pth.tar`)
 
-> ⚠️ **LƯU Ý QUAN TRỌNG:** Hai tệp này **bắt buộc phải đi cùng nhau** trong thư mục `models/`. Nếu thiếu tệp `.data`, `onnxruntime` sẽ báo lỗi không đọc được trọng số.
+Đây là mô hình tuổi/giới tính **mặc định** (`CFG.mivolo_ckpt`). Chạy một lệnh:
 
-**Cách tái tạo hoặc xuất lại file ONNX (nếu cần):**
-Nếu vì lý do nào đó bạn xóa mất 2 file trên, bạn có thể xuất lại trực tiếp từ Hugging Face bằng script có sẵn trong dự án:
 ```bash
-uv run python export_mivolo_onnx.py
+uv run python fetch_mivolo_v2.py
 ```
+
+Script tải `model.safetensors` từ [iitolstykh/mivolo_v2](https://huggingface.co/iitolstykh/mivolo_v2),
+bóc tiền tố `mivolo.model.` mà lớp bọc HuggingFace thêm vào, gắn metadata dải
+tuổi rồi lưu thành `.pth.tar` đúng định dạng mà `mivolo/model/mi_volo.py` đọc.
+Không cần `transformers` (repo HF ghim `transformers==4.51`, môi trường này đang
+5.x) vì trọng số chính là kiến trúc `mivolo_d1_384` đã có sẵn trong `mivolo/`.
+Script tự kiểm tra khớp kiến trúc và dừng nếu lệch, thay vì nạp một nửa.
+
+**Vì sao là v2:** checkpoint v1 (`model_imdb_cross_person_4.22_99.46.pth.tar`)
+huấn luyện trên IMDB-cleaned — ảnh người nổi tiếng, gần như không có ai dưới 15
+tuổi — nên đọc trẻ em già gấp đôi: bé sơ sinh ra 5-8 tuổi, học sinh tiểu học ra
+10-12. Đo trên `eval/age_kids` (chỉ các clip trẻ em): MAE 5.83 năm → **2.05 năm**,
+người lớn không đổi. Chi tiết ở `eval/age_kids/README.md`.
+
+Hai checkpoint UTKFace trong README của MiVOLO **không** dùng được: cả hai đều là
+`min_age: 21, max_age: 60` (bản chia chỉ người lớn trong bài báo).
+
+#### Đường dẫn ONNX (tuỳ chọn, không bắt buộc)
+
+`AgeGenderEstimator` ưu tiên `CFG.mivolo_weights` (ONNX) **trước** `.pth.tar`.
+Nếu bạn tạo file ONNX, hãy chắc chắn nó được xuất từ v2 — xuất từ v1 sẽ âm thầm
+đưa sai số trẻ em quay lại mà không có cảnh báo nào.
+
+1.  Cài đặt các thư viện bổ sung cần thiết phục vụ quá trình xuất ONNX:
+    ```bash
+    uv pip install setuptools timm==1.0.28 transformers==5.16.1 onnxscript
+    ```
+2.  Chạy script xuất có sẵn trong dự án — script tải checkpoint MiVOLO v2 chính
+    thức từ Hugging Face rồi ghi ra `models/mivolo_age_gender.onnx`:
+    ```bash
+    uv run python export_mivolo_onnx.py
+    ```
 
 ---
 

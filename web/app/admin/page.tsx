@@ -17,6 +17,7 @@ import {
   getAuthToken,
   getStoredUser,
 } from "@/lib/api";
+import { AGE_OPTIONS, ANY } from "@/lib/taxonomy";
 import { useCameraIngest } from "@/lib/useCameraIngest";
 import { useLive } from "@/lib/useLive";
 import { Stat } from "@/components/Stat";
@@ -49,8 +50,17 @@ export default function AdminPage() {
   const [health, setHealth] = useState<Record<string, unknown> | null>(null);
   const [mode, setMode] = useState<"server" | "browser">("server");
   const [source, setSource] = useState("0");
-  const [sourcesList, setSourcesList] = useState<{ value: string; label: string; type: string; description?: string }[]>([]);
+  const [sourcesList, setSourcesList] = useState<{ value: string; label: string; type: string; group?: string; description?: string }[]>([]);
   const [streamKey, setStreamKey] = useState<number>(() => Date.now());
+  // Which data/ subfolder groups are expanded. A named set can hold dozens of
+  // clips (data/age_kids has 35), and rendering them all flat buried the two
+  // webcam presets everyone actually starts from.
+  const [openSourceGroups, setOpenSourceGroups] = useState<Record<string, boolean>>({});
+  // An ordered queue of clips to run back to back. Empty means the picker is in
+  // its normal "one click picks one source" mode; the two behaviours share the
+  // same buttons rather than duplicating the list.
+  const [queue, setQueue] = useState<string[]>([]);
+  const [queueMode, setQueueMode] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState(false);
@@ -169,8 +179,11 @@ export default function AdminPage() {
     try {
       const list = await api.captureSources();
       setSourcesList(list);
-    } catch {
-      // ignore
+    } catch (err) {
+      // Not fatal — the picker renders its own "thử lại" state — but swallowing
+      // this without a trace left no way to tell a network failure from a
+      // genuinely empty data/ directory.
+      console.error("Không nạp được danh sách nguồn phát:", err);
     }
   }, []);
 
@@ -239,6 +252,12 @@ export default function AdminPage() {
     };
 
     fetchState();
+    // Once on mount, not inside fetchState: the source list only changes when
+    // someone uploads a clip, so re-reading it every 3s alongside the capture
+    // poll would be waste. Leaving it out of the mount path entirely was the
+    // bug — sourcesList stayed empty until the operator happened to trigger an
+    // action, and until then the picker showed its hardcoded fallback as if
+    // those three entries were everything available.
     loadSources();
     api.captureConfig().then((cfg) => { if (!ignore) setConfig(cfg); }).catch(() => undefined);
     api.thresholds().then((th) => { if (!ignore) setThresholds(th); }).catch(() => undefined);
@@ -407,12 +426,17 @@ export default function AdminPage() {
     }
   };
 
-  const startCapture = () =>
+  const startCapture = (queued?: string[]) =>
     act(async () => {
       setStreamKey(Date.now());
       const devId = selectedScreenId !== null ? selectedScreenId : "host";
       const scrId = typeof selectedScreenId === "number" ? selectedScreenId : undefined;
-      const res = await api.captureStart(mode === "browser" ? BROWSER_SOURCE : source || "0", devId, scrId);
+      const res = await api.captureStart(
+        mode === "browser" ? BROWSER_SOURCE : source || "0",
+        devId,
+        scrId,
+        mode === "browser" ? undefined : queued,
+      );
       if (!playing) {
         api.playerStart().catch(() => {});
       }
@@ -420,6 +444,9 @@ export default function AdminPage() {
       setTimeout(() => loadDeviceSessions(selectedScreenId), 1200);
       return res;
     });
+
+  const toggleQueued = (value: string) =>
+    setQueue((prev) => (prev.includes(value) ? prev.filter((v) => v !== value) : [...prev, value]));
 
   const stopCapture = () =>
     act(async () => {
@@ -469,10 +496,13 @@ export default function AdminPage() {
       "Nữ",
       "Không xác định giới tính",
       "Tuổi trung bình",
-      "Nhóm <18",
+      "Nhóm <6",
+      "Nhóm 6-13",
+      "Nhóm 13-18",
       "Nhóm 18-35",
       "Nhóm 35-55",
       "Nhóm >55",
+      "Nhóm <18 (trước khi tách)",
       "Không xác định tuổi",
       "Lượt tiếp cận (Footfall)",
       "Lượt xem thực (Impressions)",
@@ -497,10 +527,16 @@ export default function AdminPage() {
       demoCell(s, s.female_count),
       demoCell(s, s.unknown_gender_count),
       demoCell(s, s.avg_age),
-      demoCell(s, s.age_breakdown?.["<18"] ?? 0),
+      demoCell(s, s.age_breakdown?.["<6"] ?? 0),
+      demoCell(s, s.age_breakdown?.["6-13"] ?? 0),
+      demoCell(s, s.age_breakdown?.["13-18"] ?? 0),
       demoCell(s, s.age_breakdown?.["18-35"] ?? 0),
       demoCell(s, s.age_breakdown?.["35-55"] ?? 0),
       demoCell(s, s.age_breakdown?.[">55"] ?? 0),
+      // Sessions recorded before `<18` was split into the three brackets above.
+      // Kept as its own column rather than folded into one of them: the stored
+      // row is a bracket, not an age, so there is nothing to re-bucket from.
+      demoCell(s, s.age_breakdown?.["<18"] ?? 0),
       demoCell(s, s.age_breakdown?.unknown ?? 0),
       s.total_footfall,
       s.total_impressions,
@@ -1266,8 +1302,19 @@ export default function AdminPage() {
                         {running ? "Luồng Camera AI Trực Tiếp" : "Camera đang tạm dừng"}
                       </span>
                       <span className="rounded bg-slate-200/80 px-1.5 py-0.5 font-mono text-[10px] text-slate-700">
-                        {mode === "browser" ? "Nguồn Kiosk (/screen)" : `Nguồn: ${source || "0"}`}
+                        {mode === "browser"
+                          ? "Nguồn Kiosk (/screen)"
+                          : // While a queue runs, the engine's own cursor is the
+                            // truth; `source` is the whole "|"-joined queue and
+                            // would be unreadable here.
+                            `Nguồn: ${(capture?.source_now ?? source ?? "0").split("/").pop()}`}
                       </span>
+                      {running && (capture?.queue?.length ?? 0) > 1 && (
+                        <span className="rounded bg-indigo-100 px-1.5 py-0.5 font-mono text-[10px] text-indigo-700">
+                          clip {(capture?.queue?.indexOf(capture?.source_now ?? "") ?? -1) + 1}/
+                          {capture?.queue?.length}
+                        </span>
+                      )}
                     </div>
                     <div className="flex items-center gap-2 text-[11px] font-mono text-slate-500">
                       <span>{stats?.fps?.toFixed(1) ?? "0.0"} FPS</span>
@@ -1298,7 +1345,7 @@ export default function AdminPage() {
                         </p>
                         <button
                           disabled={busy}
-                          onClick={startCapture}
+                          onClick={() => startCapture()}
                           className="rounded-lg bg-emerald-600 px-4 py-2 text-xs font-semibold text-white shadow-xs hover:bg-emerald-700 transition"
                         >
                           ▶ Bật phân tích camera
@@ -1349,6 +1396,21 @@ export default function AdminPage() {
                         <span className="font-semibold text-slate-800">
                           Video mẫu TTTM kiểm tra AI đếm người:
                         </span>
+                        <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setQueueMode((on) => !on);
+                            if (queueMode) setQueue([]);
+                          }}
+                          className={`rounded-lg border px-2.5 py-1 text-[11px] font-semibold transition shadow-xs ${
+                            queueMode
+                              ? "border-indigo-500 bg-indigo-50 text-indigo-700"
+                              : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"
+                          }`}
+                        >
+                          {queueMode ? "✓ Đang chọn nhiều" : "☰ Chọn nhiều clip"}
+                        </button>
                         <label className="cursor-pointer rounded-lg border border-emerald-300 bg-emerald-50 px-2.5 py-1 text-[11px] font-semibold text-emerald-700 transition hover:bg-emerald-100 shadow-xs">
                           + Tải lên video TTTM (.mp4)
                           <input
@@ -1358,71 +1420,144 @@ export default function AdminPage() {
                             onChange={handleUploadTestVideo}
                           />
                         </label>
+                        </div>
                       </div>
+
+                      {queueMode && (
+                        <div className="rounded-lg border border-indigo-200 bg-indigo-50/60 p-2 space-y-1.5">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-semibold text-indigo-900">
+                              Hàng đợi: {queue.length} clip
+                            </span>
+                            <span className="text-[11px] text-indigo-700">
+                              chạy lần lượt, hết clip cuối thì quay lại clip đầu
+                            </span>
+                            <div className="ml-auto flex gap-1.5">
+                              <button
+                                type="button"
+                                disabled={queue.length === 0 || busy}
+                                onClick={() => setQueue([])}
+                                className="rounded-lg border border-slate-300 bg-white px-2.5 py-1 font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-40"
+                              >
+                                Xoá hết
+                              </button>
+                              <button
+                                type="button"
+                                disabled={queue.length === 0 || busy}
+                                onClick={() => startCapture(queue)}
+                                className="rounded-lg bg-indigo-600 px-2.5 py-1 font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-40"
+                              >
+                                ▶ Chạy liên tục {queue.length} clip
+                              </button>
+                            </div>
+                          </div>
+                          {queue.length > 0 && (
+                            <ol className="flex flex-wrap gap-1 text-[11px] text-indigo-900">
+                              {queue.map((value, index) => (
+                                <li
+                                  key={value}
+                                  className="rounded border border-indigo-200 bg-white px-1.5 py-0.5"
+                                >
+                                  {index + 1}. {value.split("/").pop()}
+                                </li>
+                              ))}
+                            </ol>
+                          )}
+                        </div>
+                      )}
 
                       <div className="flex flex-wrap gap-1.5">
                         {sourcesList.length > 0 ? (
-                          sourcesList.map((s) => (
-                            <button
-                              key={s.value}
-                              type="button"
-                              onClick={() => handleSelectSource(s.value, "server")}
-                              className={`rounded-lg border px-2.5 py-1 text-xs transition ${
-                                source === s.value
-                                  ? "border-emerald-600 bg-emerald-50 font-semibold text-emerald-800 shadow-xs"
-                                  : "border-slate-200 bg-white text-slate-700 hover:border-emerald-500 hover:bg-slate-50"
-                              }`}
-                            >
-                              {s.label}
-                            </button>
-                          ))
+                          (() => {
+                            const ungrouped = sourcesList.filter((s) => !s.group);
+                            const groups = sourcesList.reduce<Record<string, typeof sourcesList>>((acc, s) => {
+                              if (s.group) (acc[s.group] ||= []).push(s);
+                              return acc;
+                            }, {});
+                            // One button, two modes. In queue mode a click adds
+                            // or removes the clip and shows its position; the
+                            // webcam and browser presets stay single-pick,
+                            // because a queue of live cameras is not a thing.
+                            const btn = (s: (typeof sourcesList)[number]) => {
+                              const queueable = queueMode && s.type === "file";
+                              const at = queue.indexOf(s.value);
+                              const picked = queueable ? at >= 0 : source === s.value;
+                              return (
+                                <button
+                                  key={s.value}
+                                  type="button"
+                                  title={s.description}
+                                  onClick={() => {
+                                    if (queueable) {
+                                      toggleQueued(s.value);
+                                      return;
+                                    }
+                                    handleSelectSource(s.value, "server");
+                                  }}
+                                  className={`rounded-lg border px-2.5 py-1 text-xs transition ${
+                                    picked
+                                      ? queueable
+                                        ? "border-indigo-500 bg-indigo-50 font-semibold text-indigo-800 shadow-xs"
+                                        : "border-emerald-600 bg-emerald-50 font-semibold text-emerald-800 shadow-xs"
+                                      : "border-slate-200 bg-white text-slate-700 hover:border-emerald-500 hover:bg-slate-50"
+                                  } ${queueMode && !queueable ? "opacity-40" : ""}`}
+                                >
+                                  {queueable && at >= 0 && (
+                                    <span className="mr-1 font-bold">{at + 1}.</span>
+                                  )}
+                                  {s.label}
+                                </button>
+                              );
+                            };
+                            return (
+                              <>
+                                {ungrouped.map(btn)}
+                                {Object.entries(groups).map(([name, items]) => {
+                                  // Keep a collapsed group open when the running
+                                  // source is inside it, so the active choice is
+                                  // never hidden behind a toggle.
+                                  const hasActive = items.some((s) => s.value === source);
+                                  const open = openSourceGroups[name] ?? hasActive;
+                                  return (
+                                    <div key={name} className="w-full space-y-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setOpenSourceGroups((prev) => ({ ...prev, [name]: !open }))
+                                        }
+                                        className="flex w-full items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-left text-xs font-semibold text-slate-700 transition hover:border-emerald-500 hover:bg-slate-50"
+                                      >
+                                        <span className="text-slate-400">{open ? "▾" : "▸"}</span>
+                                        {name}
+                                        <span className="ml-auto rounded-full bg-slate-100 px-1.5 text-[10px] font-medium text-slate-500">
+                                          {items.length}
+                                        </span>
+                                      </button>
+                                      {open && <div className="flex flex-wrap gap-1.5 pl-3">{items.map(btn)}</div>}
+                                    </div>
+                                  );
+                                })}
+                              </>
+                            );
+                          })()
                         ) : (
-                          <>
+                          // No hardcoded fallback list here. There used to be
+                          // three buttons, which rendered whenever the fetch
+                          // had not landed and looked exactly like a complete
+                          // source list — so a failed load was indistinguishable
+                          // from "this machine only has three clips", and every
+                          // video added since stayed invisible. An empty list is
+                          // now reported as what it is.
+                          <div className="flex items-center gap-2 text-slate-500">
+                            <span>Chưa nạp được danh sách nguồn phát.</span>
                             <button
                               type="button"
-                              onClick={() => handleSelectSource("0", "server")}
-                              className={`rounded-lg border px-2.5 py-1 text-xs transition ${
-                                source === "0"
-                                  ? "border-emerald-600 bg-emerald-50 font-semibold text-emerald-800"
-                                  : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-                              }`}
+                              onClick={() => loadSources()}
+                              className="rounded-lg border border-slate-300 bg-white px-2.5 py-1 font-semibold text-slate-700 transition hover:border-emerald-500 hover:bg-slate-50"
                             >
-                              📹 Webcam máy tính (Index 0)
+                              Thử lại
                             </button>
-                            <button
-                              type="button"
-                              onClick={() => handleSelectSource("browser", "browser")}
-                              className={`rounded-lg border px-2.5 py-1 text-xs transition ${
-                                source === "browser"
-                                  ? "border-emerald-600 bg-emerald-50 font-semibold text-emerald-800"
-                                  : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-                              }`}
-                            >
-                              🌐 Webcam Kiosk (Browser)
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleSelectSource("inputs/video1.mp4", "server")}
-                              className={`rounded-lg border px-2.5 py-1 text-xs transition ${
-                                source === "inputs/video1.mp4"
-                                  ? "border-emerald-600 bg-emerald-50 font-semibold text-emerald-800"
-                                  : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-                              }`}
-                            >
-                              🎬 Video test 1 (video1.mp4)
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleSelectSource("inputs/video2.mp4", "server")}
-                              className={`rounded-lg border px-2.5 py-1 text-xs transition ${
-                                source === "inputs/video2.mp4"
-                                  ? "border-emerald-600 bg-emerald-50 font-semibold text-emerald-800"
-                                  : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"
-                              }`}
-                            >
-                              🎬 Video test 2 (video2.mp4)
-                            </button>
-                          </>
+                          </div>
                         )}
                       </div>
                     </div>
@@ -1698,7 +1833,7 @@ export default function AdminPage() {
                               ? "Nữ"
                               : "Khán giả"}
                             {stats.recommendation.viewer_approx_age != null &&
-                              ` · ~${Math.round(stats.recommendation.viewer_approx_age)} tuổi`}
+                              ` · ~${stats.recommendation.viewer_approx_age} tuổi`}
                           </span>
                         </div>
 
@@ -2179,7 +2314,7 @@ export default function AdminPage() {
                             )}
                           </td>
                           <td className="py-3 px-3 text-right font-mono text-slate-700">
-                            {s.avg_age != null ? `${s.avg_age.toFixed(1)}` : <span className="text-slate-300">—</span>}
+                            {s.avg_age ?? <span className="text-slate-300">—</span>}
                           </td>
                           <td className="py-3 px-3 text-right font-mono text-slate-700">
                             {s.avg_dwell_time.toFixed(1)}s
@@ -2354,12 +2489,19 @@ export default function AdminPage() {
                   const femalePct = totalGender > 0 ? 100 - malePct : 0;
 
                   const ages = sessionDetailModal.age_breakdown || {};
-                  const ageBrackets: Record<string, number> = {
-                    "<18": Number(ages["<18"] || 0),
-                    "18-35": Number(ages["18-35"] || 0),
-                    "35-55": Number(ages["35-55"] || 0),
-                    ">55": Number(ages[">55"] || 0),
-                  };
+                  // Built from AGE_OPTIONS so this cannot drift from the
+                  // backend's AGE_GROUPS the way the hardcoded four did. The
+                  // pre-split `<18` bracket is appended only when old sessions
+                  // in view still carry it.
+                  const ageBrackets: Record<string, number> = Object.fromEntries(
+                    AGE_OPTIONS.filter((o) => o.value !== ANY).map((o) => [
+                      o.value,
+                      Number(ages[o.value] || 0),
+                    ]),
+                  );
+                  if (Number(ages["<18"] || 0) > 0) {
+                    ageBrackets["<18"] = Number(ages["<18"]);
+                  }
                   const totalAge = Object.values(ageBrackets).reduce((acc, v) => acc + v, 0);
 
                   return (
@@ -2378,7 +2520,7 @@ export default function AdminPage() {
                           <span>
                             Tuổi trung bình:{" "}
                             <span className="font-semibold text-slate-600">
-                              {sessionDetailModal.avg_age != null ? `${sessionDetailModal.avg_age.toFixed(1)} tuổi` : "—"}
+                              {sessionDetailModal.avg_age != null ? `${sessionDetailModal.avg_age} tuổi` : "—"}
                             </span>
                           </span>
                         </div>
@@ -2522,7 +2664,7 @@ export default function AdminPage() {
                             )}
                           </td>
                           <td className="py-1.5 px-2 text-right font-mono text-slate-600">
-                            {t.age != null ? t.age.toFixed(0) : <span className="text-slate-300">—</span>}
+                            {t.age ?? <span className="text-slate-300">—</span>}
                           </td>
                           <td className="py-1.5 px-2 text-slate-600">
                             {t.age_group || <span className="text-slate-300">—</span>}

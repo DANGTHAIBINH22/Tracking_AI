@@ -132,7 +132,7 @@ class AdRecommendation(BaseModel):
     match_score: float = 0.0          # 0.0 to 100.0%
     viewer_age_group: str | None = None
     viewer_gender: str | None = None
-    viewer_approx_age: float | None = None
+    viewer_approx_age: int | None = None
     crowd_context: str | None = None   # "single" | "group" | "crowd"
     people_count: int = 0
     scene_weather: str | None = None
@@ -244,7 +244,7 @@ class NowPlaying(BaseModel):
 class LiveTrack(BaseModel):
     track_id: int
     bbox: tuple[int, int, int, int]
-    age: float | None = None
+    age: int | None = None
     age_group: str | None = None
     gender: str | None = None
     yaw: float | None = None

@@ -63,13 +63,32 @@ class Config:
     min_face_px_for_pose: int = 16  # MediaPipe's ImageToTensor hard-fails below this
 
     # ---- 2.5 age/gender (MiVOLO, Phase 4) ----
-    # Face-only volo_d1 (IMDB-cleaned), exported to ONNX from the official
-    # checkpoint — see age_gender.py's module docstring for why this replaced
-    # the original GoogLeNet/Adience ONNX pair (age_onnx.onnx / gender_onnx.onnx,
-    # both still on disk but unused: measured resolution-unstable, up to a
-    # 44-year swing on the same face).
+    # See age_gender.py's module docstring for why MiVOLO replaced the original
+    # GoogLeNet/Adience ONNX pair (age_onnx.onnx / gender_onnx.onnx, both still
+    # on disk but unused: measured resolution-unstable, up to a 44-year swing on
+    # the same face).
+    #
+    # mivolo_ckpt is MiVOLO v2, trained on Lagenda (min_age 0, max_age 122) —
+    # get it with `uv run python fetch_mivolo_v2.py`. It replaced the v1
+    # IMDB-cleaned checkpoint because IMDB-WIKI is celebrity photos and contains
+    # almost nobody under 15, so v1 read children at roughly twice their age
+    # (infants as 5-8, primary-schoolers as 10-12). Measured on eval/age_kids,
+    # children only: MAE 5.83y (v1) -> 2.05y (v2), with adults unchanged.
+    # In the terms the app actually reports — which age_bins bracket a viewer
+    # lands in — that is 70% -> 91% over the 33 scored clips. Re-measure with
+    # `PYTHONPATH=. uv run python eval/age_kids/run_eval.py --ckpt <path>`.
+    # The old checkpoints still load — point this at one to reproduce:
+    #   model_imdb_cross_person_4.22_99.46.pth.tar  v1, dual-stream face+body
+    #   volo_d1_age_gender_imdb_faceonly.pth.tar    v1, face-only (3 channels)
+    # The two UTKFace checkpoints in MiVOLO's README are NOT alternatives: both
+    # are min_age 21 / max_age 60, the paper's adult-only UTK split.
+    #
+    # Precedence: AgeGenderEstimator tries mivolo_weights (ONNX) first and only
+    # falls back to mivolo_ckpt. The ONNX in README.md was exported from the v1
+    # checkpoint, so generating it would silently put the child bias back —
+    # re-export from v2 or leave the file absent.
     mivolo_weights: Path = MODELS_DIR / "mivolo_age_gender.onnx"
-    mivolo_ckpt: Path = MODELS_DIR / "model_imdb_cross_person_4.22_99.46.pth.tar"
+    mivolo_ckpt: Path = MODELS_DIR / "mivolo_v2_lagenda.pth.tar"
     age_enabled: bool = True
     age_gender_every_n: int = 5  # re-estimate every N frames while collecting votes
     age_gender_samples: int = 3  # votes to collect per track before the answer settles
@@ -77,8 +96,19 @@ class Config:
     # the old net's 44-year swing), so this floor only screens out degenerate
     # slivers of a crop, not "small but usable" faces.
     min_face_px_for_age: int = 24
+    # Exclusive upper bound -> label. The under-18 range is split three ways
+    # because a signage advert for nappies, for toys and for a game console are
+    # aimed at three different people, and one "0-18" bucket reported them as
+    # one. Splitting only became worth doing once the age head could tell them
+    # apart: the v1 checkpoint read every child as 10-12 regardless.
+    # The 0-6 boundary is the shakiest — v2's residual error on children is
+    # ~2 years, so a 5-to-7-year-old will flip between the first two buckets.
+    # server/audience.py maps these onto the app's own spellings by the numeric
+    # bound, so renaming a label here is safe but moving a bound is not.
     age_bins: tuple[tuple[int, str], ...] = (
-        (18, "0-18"),
+        (6, "0-6"),
+        (13, "6-13"),
+        (18, "13-18"),
         (35, "18-35"),
         (55, "35-55"),
         (200, "55+"),

@@ -1,13 +1,34 @@
 """2.5 - Age & gender estimation (MiVOLO). Phase 4.
 
-Pretrained face-only volo_d1 (IMDB-cleaned, MiVOLO paper: arXiv:2307.04616,
-github.com/WildChlamydia/MiVOLO, Apache-2.0), exported to ONNX so this project
-only needs onnxruntime, not torch/timm at runtime. Reported: age MAE 4.22,
-gender accuracy 99.38%.
+Pretrained MiVOLO (paper: arXiv:2307.04616, github.com/WildChlamydia/MiVOLO,
+Apache-2.0). Two loaders, tried in that order: an ONNX export if one is on disk,
+otherwise the .pth.tar checkpoint through the vendored `mivolo/` package.
 
-The exported graph does the post-processing itself: a 224x224 letterboxed RGB
-crop in, [age_years, p_male, p_female] out — no raw logits or bucket midpoints
-to unscale here, unlike the GoogLeNet/Adience pair this replaced.
+The checkpoint is chosen in configs.py, and which one it is matters more than
+anything in this file. The default is MiVOLO v2 (Lagenda, ages 0-122). It
+replaced the v1 IMDB-cleaned checkpoint because IMDB-WIKI is celebrity photos
+with almost no subject under 15: v1 read infants as 5-8 and primary-school
+children as 10-12, i.e. children came out at roughly double their age while
+adults were fine. On eval/age_kids, children only, that is MAE 5.83y -> 2.05y.
+Neither the face-only/face+body choice nor CFG.face_margin moved it measurably;
+it was the training distribution, not the plumbing.
+
+A checkpoint declares its own shape and this module follows it, rather than
+assuming one variant:
+  - `meta.with_persons_model` — dual-stream (face+body, 6 channels) vs face-only
+    (3). This pipeline never has a body crop, so a dual-stream model gets a
+    normalised zero image for the body half, which is what MiVOLO's body dropout
+    trained against. Hardcoding the 6-channel concat made every face-only
+    checkpoint fail with "expected input[1, 6, ...] to have 3 channels".
+  - `meta.only_age` — a `no_gender` checkpoint emits one column, not three.
+    `AgeGender.gender` is then None, and the pipeline's vote degrades to
+    "gender unknown" rather than reading an age value as a gender logit.
+
+The ONNX path (no such file is shipped; see CFG.mivolo_weights) expects a graph
+that does its own post-processing: an INPUT_SIZE letterboxed RGB crop in,
+[age_years, p_male, p_female] out — no raw logits or bucket midpoints to unscale
+here, unlike the GoogLeNet/Adience pair this replaced. The .pth.tar path does
+unscale, with the checkpoint's own min/max/avg_age.
 
 Why the swap: the previous age_onnx.onnx (GoogLeNet, ONNX model zoo, Adience
 buckets) was measured broken — it tracks crop sharpness, not age. The same face
@@ -17,9 +38,16 @@ gender. MiVOLO on the same crops stayed within ~2-6 years across every
 resolution tested (16px-295px). See CFG.min_face_px_for_age / age_enabled in
 configs.py for how the pipeline guards against crops too small to trust.
 
-Honest limitation for the report: MAE 4.22 is in-domain (IMDB-cleaned); expect
-cross-domain MAE 5-8y on your own footage, and group boundaries will still flip
-near a bucket edge. Evaluate with age-group accuracy + a confusion matrix.
+Honest limitations for the report, with v2 in place:
+  - The 2.05y figure is measured against age bands read off the footage by eye,
+    not birth dates — stock clips carry none. It is good enough to show the v1
+    bias is gone; it is not a publishable MAE. See eval/age_kids/README.md.
+  - Far-field is still unreliable. At 35-45px a 7-10 year old reads ~26 and a
+    family at distance reads ~29. CFG.min_face_px_for_age (24) is well below
+    where the age head is actually trustworthy; treat anything under ~60px as
+    footfall, not demographics.
+  - Group boundaries still flip near a bucket edge, so evaluate with age-group
+    accuracy plus a confusion matrix, not a single scalar.
 """
 
 from __future__ import annotations
@@ -33,9 +61,15 @@ from configs import CFG
 
 @dataclass
 class AgeGender:
-    age: float
+    # Whole years. The model regresses a continuous value, but its residual
+    # error on this footage is ~2 years, so a tenth of a year is noise dressed
+    # as precision — "7.4 tuổi" reads like a measurement and is not one.
+    # Rounding here rather than at each display keeps every consumer (CSV, live
+    # table, recommendation banner, the shop-window screen) saying the same
+    # number.
+    age: int
     age_group: str
-    gender: str          # "M" | "F"
+    gender: str | None   # "M" | "F", or None for a no_gender ("only_age") checkpoint
     gender_conf: float
 
 
@@ -91,11 +125,15 @@ class AgeGenderEstimator:
         if self._sess is not None or self._torch_model is not None or self._model_failed:
             return
         from pathlib import Path
-        weights_path = Path(self.weights)
+        # A falsy path means "no ONNX for this instance" and must short-circuit
+        # before Path(): Path("") is Path("."), the current directory, which
+        # exists — so an empty string used to reach onnxruntime and fail there
+        # with a confusing constructor error instead of falling through.
+        weights_path = Path(self.weights) if self.weights else None
         ckpt_path = Path(self.ckpt) if self.ckpt else None
 
         # 1. Check ONNX weights
-        if weights_path.exists():
+        if weights_path is not None and weights_path.exists():
             try:
                 import onnxruntime as ort
                 opts = ort.SessionOptions()
@@ -145,7 +183,7 @@ class AgeGenderEstimator:
             rng = random.Random(track_id)
             age = rng.randint(18, 60)
             return AgeGender(
-                age=float(age),
+                age=age,
                 age_group=map_age_group(age),
                 gender=rng.choice(["M", "F"]),
                 gender_conf=0.85 + (track_id % 15) / 100.0,
@@ -155,21 +193,42 @@ class AgeGenderEstimator:
             try:
                 import torch
                 from mivolo.data.misc import prepare_classification_images
+                meta = self._torch_model.meta
                 dev = self._torch_model.device
+                cfgd = self._torch_model.data_config
                 face_input = prepare_classification_images(
-                    [face_bgr], self._input_size, self._torch_model.data_config["mean"], self._torch_model.data_config["std"], device=dev
+                    [face_bgr], self._input_size, cfgd["mean"], cfgd["std"], device=dev
                 )
-                body_input = prepare_classification_images(
-                    [None], self._input_size, self._torch_model.data_config["mean"], self._torch_model.data_config["std"], device=dev
-                )
-                model_input = torch.cat((face_input, body_input), dim=1)
+                if meta.with_persons_model:
+                    # Dual-stream checkpoint: the graph's first conv takes 6 channels, so
+                    # the body half has to be there even though this pipeline never has a
+                    # body crop. prepare_classification_images turns None into a normalised
+                    # zero image, which is what MiVOLO's own body dropout trained against.
+                    body_input = prepare_classification_images(
+                        [None], self._input_size, cfgd["mean"], cfgd["std"], device=dev
+                    )
+                    model_input = torch.cat((face_input, body_input), dim=1)
+                else:
+                    # Face-only checkpoint: 3 channels. Concatenating a blank body here
+                    # raises "expected input[1, 6, ...] to have 3 channels".
+                    model_input = face_input
                 out = self._torch_model.inference(model_input)
-                gender_probs = out[:, :2].softmax(-1)
-                gender_idx = 0 if gender_probs[0, 0] >= gender_probs[0, 1] else 1
-                gender = GENDER_LIST[gender_idx]
-                gender_conf = float(gender_probs[0, gender_idx].item())
-                age_raw = out[0, 2].item()
-                age = float(round(age_raw * (self._torch_model.meta.max_age - self._torch_model.meta.min_age) + self._torch_model.meta.avg_age, 1))
+
+                if meta.only_age:
+                    # no_gender checkpoint: one output column, no gender logits to read.
+                    gender, gender_conf = None, 0.0
+                    age_raw = out[0, 0].item()
+                else:
+                    gender_probs = out[:, :2].softmax(-1)
+                    gender_idx = 0 if gender_probs[0, 0] >= gender_probs[0, 1] else 1
+                    gender = GENDER_LIST[gender_idx]
+                    gender_conf = float(gender_probs[0, gender_idx].item())
+                    age_raw = out[0, 2].item()
+
+                # max(0, ...) because a Lagenda checkpoint has min_age 0 and the
+                # regression can undershoot past it on an infant — a negative
+                # age is never an answer worth reporting.
+                age = max(0, round(age_raw * (meta.max_age - meta.min_age) + meta.avg_age))
                 return AgeGender(age=age, age_group=map_age_group(age), gender=gender, gender_conf=gender_conf)
             except Exception as e:
                 print(f"[AgeGender] CẢNH BÁO: Lỗi suy luận MiVOLO PyTorch ({e}).")
@@ -190,7 +249,7 @@ class AgeGenderEstimator:
             self._sess = None
             self._model_failed = True
             return None
-        age = float(round(age, 1))
+        age = max(0, round(float(age)))
         gender_idx = 0 if p_male >= p_female else 1
         gender = GENDER_LIST[gender_idx]
         gender_conf = float(p_male if gender_idx == 0 else p_female)

@@ -270,18 +270,16 @@ def main() -> None:
             out_csv.parent.mkdir(exist_ok=True)
             import csv
 
+            # _age_cache holds (age, age_group, gender) per track — unpacking two
+            # of the three raised "too many values to unpack" on exit from any
+            # session that had aged at least one face, i.e. the report was never
+            # written. Age is a column of its own here because the bucket alone
+            # throws away what the estimator actually said.
             fields = ["track_id", "age", "age_group", "gender"]
             with open(out_csv, "w", newline="") as f:
                 writer = csv.writer(f)
                 writer.writerow(fields)
-                for tid, val in pipe._age_cache.items():
-                    if isinstance(val, (tuple, list)) and len(val) == 3:
-                        age, age_grp, g = val
-                    elif isinstance(val, (tuple, list)) and len(val) == 2:
-                        age_grp, g = val
-                        age = None
-                    else:
-                        age, age_grp, g = None, None, None
+                for tid, (age, age_grp, g) in pipe._age_cache.items():
                     writer.writerow([tid, age, age_grp, g])
             print(f"Saved live webcam session report to: {out_csv}")
 

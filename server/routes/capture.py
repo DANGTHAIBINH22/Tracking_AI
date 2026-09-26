@@ -9,7 +9,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from server.settings import SETTINGS
-from server.sources import is_browser_source
+from server.sources import PlaylistSource, is_browser_source
 from server.state import ENGINE
 
 router = APIRouter(prefix="/api/capture", tags=["capture"])
@@ -19,6 +19,11 @@ class CaptureStart(BaseModel):
     # "0" = default webcam; "browser" waits for a screen to push frames in over
     # /ws/ingest; anything else is a path/URL replayed as if it were live.
     source: str | None = None
+    # Several clips to play back to back, for a test run nobody has to sit and
+    # restart. Takes precedence over `source`. The engine resets the tracker at
+    # every clip boundary, so the run is a sequence of separate scenes rather
+    # than one long stream with track ids bleeding across the cuts.
+    sources: list[str] | None = None
     device_id: str | None = None
     screen_id: int | None = None
     notes: str = ""
@@ -40,13 +45,23 @@ def config() -> dict:
 def state() -> dict:
     snap = ENGINE.snapshot()
     return {"running": snap["running"], "source": snap["source"],
+            # `source` is the whole queue when several clips are running back to
+            # back; these two say where in it the engine currently is.
+            "source_now": snap.get("source_now"), "queue": snap.get("queue"),
             "mode": snap["mode"], "fps": snap["fps"], "error": snap["error"],
             "ingest": ENGINE.browser.status()}
 
 
 @router.post("/start")
 def start(body: CaptureStart | None = None) -> dict:
-    source = (body.source if body else None) or SETTINGS.default_source
+    queued = [s.strip() for s in (body.sources or [])] if body else []
+    queued = [s for s in queued if s]
+    if queued and any(is_browser_source(s) for s in queued):
+        raise HTTPException(400, "Không thể xếp hàng nguồn 'browser' cùng video — chọn một trong hai.")
+    source = (
+        PlaylistSource.SEPARATOR.join(queued) if queued
+        else (body.source if body else None) or SETTINGS.default_source
+    )
     device_id = (body.device_id if body else None) or "host"
     screen_id = body.screen_id if body else None
     notes = (body.notes if body else "") or ""
@@ -82,10 +97,65 @@ def stop() -> dict:
     return state()
 
 
+_VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
+
+# A subfolder of data/ is a named set of clips rather than a stray upload, so it
+# gets a heading in the picker instead of 35 unlabelled buttons in one row.
+_FOLDER_LABELS = {
+    "age_kids": "Trẻ em & thiếu niên (kiểm tra ước lượng tuổi)",
+    "age_adults": "Người trung niên & cao tuổi (kiểm tra 35-55 / >55)",
+    "retail": "Bối cảnh bán lẻ (khách đi ngang, chọn hàng, quầy thu ngân)",
+}
+
+# The child/teen set is named by subject prefix — see eval/age_kids/manifest.tsv
+# — so a label can say which age band a clip exercises instead of echoing the
+# filename. Longest prefix first: "children_" must win over "child_".
+_CLIP_PREFIXES = (
+    ("children_", "🧒", "Nhiều trẻ em"),
+    ("child_", "🧒", "Trẻ em ~2-13"),
+    ("baby_", "👶", "Trẻ sơ sinh 0-2"),
+    ("teen_", "🧑", "Thiếu niên ~13-25"),
+    ("mixed_", "👨‍👧", "Trẻ em + người lớn"),
+    ("farfield_", "🔭", "Mặt ở xa (~35-50px)"),
+    ("senior_", "🧓", "Cao tuổi >55"),
+    ("grandmother_", "🧓", "Cao tuổi >55"),
+    ("grandparents_", "🧓", "Cao tuổi + trẻ em"),
+    ("two_generations_", "🧓", "Hai thế hệ trong một khung"),
+    ("adult_", "🧑‍💼", "Trung niên ~35-55"),
+)
+
+
+def _clip_label(stem: str, filename: str, *, in_folder: bool) -> str:
+    """A button caption. `in_folder` clips are already grouped under a heading,
+    so they drop the filename and the trailing mixkit id that the top-level
+    captions keep — "Browsing Supermarket Items 25438
+    (browsing_supermarket_items-25438.mp4)" said the same thing three times."""
+    lowered = stem.lower()
+    for prefix, emoji, what in _CLIP_PREFIXES:
+        if lowered.startswith(prefix):
+            rest = stem[len(prefix):].rsplit("-", 1)[0].replace("_", " ")
+            return f"{emoji} {what}: {rest}"
+    if in_folder:
+        return f"🎬 {stem.rsplit('-', 1)[0].replace('_', ' ').replace('-', ' ').capitalize()}"
+    if "store" in lowered or "aisle" in lowered:
+        return f"🛒 Video mẫu: TTTM / Siêu thị ({filename})"
+    if "walking" in lowered:
+        return f"🚶 Video mẫu: Người đi lại ({filename})"
+    if "pose" in lowered:
+        return f"👤 Video mẫu: Hướng nhìn khuôn mặt ({filename})"
+    return f"🎬 Video test: {stem.replace('-', ' ').replace('_', ' ').title()} ({filename})"
+
+
 @router.get("/sources")
 def list_available_sources() -> list[dict]:
-    """List preset hardware and all test video files in data/ directory."""
-    import os
+    """Preset hardware plus every test video under data/, one subfolder deep.
+
+    Recursing was not optional once the clips stopped being a flat handful:
+    `data/age_kids/` holds the child/teen set that eval/age_kids/fetch.sh pulls
+    down, and a top-level-only scan left all of it unreachable from /admin even
+    though the engine takes the path happily. Depth is capped at one level so a
+    stray folder of frames cannot flood the picker.
+    """
     from pathlib import Path
 
     results = [
@@ -93,37 +163,38 @@ def list_available_sources() -> list[dict]:
             "value": "0",
             "label": "📹 Webcam máy tính (cục bộ)",
             "type": "webcam",
+            "group": "",
             "description": "Camera gắn trực tiếp trên máy chạy server",
         },
         {
             "value": "browser",
             "label": "🌐 Webcam màn hình Kiosk (Browser)",
             "type": "browser",
+            "group": "",
             "description": "Camera từ trình duyệt mở trang /screen hoặc /homescreen",
         },
     ]
 
-    video_exts = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
-    for folder in [Path("inputs"), Path("data")]:
-        if folder.exists() and folder.is_dir():
-            for f in sorted(folder.iterdir()):
-                if f.is_file() and f.suffix.lower() in video_exts:
-                    name_clean = f.stem.replace("-", " ").replace("_", " ").title()
-                    if "store" in f.stem.lower() or "aisle" in f.stem.lower():
-                        label = f"🛒 Video mẫu: TTTM / Siêu thị ({f.name})"
-                    elif "walking" in f.stem.lower():
-                        label = f"🚶 Video mẫu: Người đi lại ({f.name})"
-                    elif "pose" in f.stem.lower():
-                        label = f"👤 Video mẫu: Hướng nhìn khuôn mặt ({f.name})"
-                    else:
-                        label = f"🎬 Video test: {name_clean} ({f.name})"
+    data_dir = Path("data")
+    if not (data_dir.exists() and data_dir.is_dir()):
+        return results
 
-                    results.append({
-                        "value": f"{folder.name}/{f.name}",
-                        "label": label,
-                        "type": "file",
-                        "description": f"Video giả lập luồng camera từ file {folder.name}/{f.name}",
-                    })
+    def add_clips(folder: Path, group: str) -> None:
+        for f in sorted(folder.iterdir()):
+            if not (f.is_file() and f.suffix.lower() in _VIDEO_EXTS):
+                continue
+            rel = f.relative_to(data_dir).as_posix()
+            results.append({
+                "value": f"data/{rel}",
+                "label": _clip_label(f.stem, f.name, in_folder=bool(group)),
+                "type": "file",
+                "group": group,
+                "description": f"Video giả lập luồng camera từ file {rel}",
+            })
+
+    add_clips(data_dir, "")
+    for sub in sorted(p for p in data_dir.iterdir() if p.is_dir() and not p.name.startswith(".")):
+        add_clips(sub, _FOLDER_LABELS.get(sub.name, sub.name))
 
     return results
 

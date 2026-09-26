@@ -36,9 +36,9 @@ import numpy as np
 from crop import crop_face
 from server import audience
 
-# The vocabulary the /ads form offers. Deliberately spelled out here rather than
-# taken from CFG.age_bins: those labels ("0-18", "55+") do not match the ones the
-# form stores ("<18", ">55"), and a suggestion the form cannot represent is worse
+# The vocabulary the /ads form offers. Deliberately not taken from CFG.age_bins:
+# some of those labels ("0-6", "55+") are spelt differently from the ones the
+# form stores ("<6", ">55"), and a suggestion the form cannot represent is worse
 # than no suggestion.
 # The vocabulary lives in server.audience so the model's labels, the advert's
 # target and the dropdown cannot drift apart again.
@@ -177,7 +177,7 @@ Hãy phân tích quảng cáo này nhắm đến đối tượng nào, rồi tr�
 
 {
   "category": một trong %(categories)s,
-  "target_age_group": một trong ["<18", "18-35", "35-55", ">55", "all"],
+  "target_age_group": một trong %(age_groups)s,
   "target_gender": một trong ["M", "F", "all"],
   "target_crowd": một trong ["single", "group", "crowd", "all"],
   "product": mô tả ngắn sản phẩm/dịch vụ nhìn thấy, tối đa 10 từ,
@@ -226,7 +226,13 @@ def _read_vlm(frames: list[np.ndarray], profile: CreativeProfile) -> dict | None
     if not content:
         return None
 
-    content.append({"type": "text", "text": VLM_PROMPT % {"categories": json.dumps(list(CATEGORIES), ensure_ascii=False)}})
+    # The age list is interpolated rather than written out so it cannot drift
+    # from AGE_GROUPS the way the /ads dropdown once did — a bracket the form
+    # cannot store is worse than no suggestion.
+    content.append({"type": "text", "text": VLM_PROMPT % {
+        "categories": json.dumps(list(CATEGORIES), ensure_ascii=False),
+        "age_groups": json.dumps(list(AGE_GROUPS) + [audience.ANY], ensure_ascii=False),
+    }})
 
     try:
         response = httpx.post(
