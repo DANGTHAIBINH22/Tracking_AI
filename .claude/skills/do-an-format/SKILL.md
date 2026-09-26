@@ -74,6 +74,11 @@ Chương 3 …      (bold, 14pt)
 3.2. …          (bold, 13pt)
 ```
 
+### Góp ý bổ sung của giảng viên hướng dẫn
+
+- **Không dùng bullet / gạch đầu dòng** (●, -, +, danh sách đánh số 1. 2. 3.) trong thân bài. Mọi danh sách phải **viết lại thành đoạn văn** có từ nối ("Thứ nhất…", "Bên cạnh đó…", "Cuối cùng…"), giữ nguyên nội dung và số liệu; không để nhãn in đậm kiểu "Tiêu đề: nội dung" ở đầu đoạn. Áp dụng cho **toàn bộ báo cáo**, không chỉ chỗ được góp ý.
+- **Công thức không in nghiêng** và **phải đánh số** theo dạng `(chương.thứ tự)`, ví dụ `(2.1)`, `(2.2)`: công thức căn giữa, số thứ tự căn phải cùng dòng (dùng bảng 2 cột không viền trong Word).
+
 ### Tài liệu tham khảo
 
 - Trích dẫn theo **chuẩn IEEE** (trong văn bản dùng `[1]`, `[2]`…).
@@ -93,4 +98,6 @@ Chương 3 …      (bold, 14pt)
 - [ ] Hình/bảng đánh số `chương.thứ tự`, có caption và nguồn
 - [ ] Chú thích là footnote có đánh số
 - [ ] Chương/mục số Ả-rập; tiêu đề chương bold 14pt, mục/tiểu mục bold 13pt
+- [ ] Không có bullet/gạch đầu dòng/danh sách đánh số trong thân bài — tất cả đã viết thành đoạn văn
+- [ ] Công thức không in nghiêng, đánh số `(chương.thứ tự)` căn phải
 - [ ] Tài liệu tham khảo chuẩn IEEE, tách Việt/Anh, xếp alphabet theo tác giả, chỉ gồm tài liệu có trích dẫn
