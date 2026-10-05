@@ -16,7 +16,30 @@ class UserPublic(BaseModel):
     id: int
     username: str
     full_name: str
-    role: str
+    role: str               # "admin" | "operator"
+    is_active: bool = True
+    created_at: float | None = None
+    last_login: float | None = None
+
+
+class UserCreate(BaseModel):
+    username: str = Field(min_length=3, max_length=64, pattern=r"^[A-Za-z0-9_.@-]+$")
+    password: str
+    full_name: str = ""
+    role: str = "operator"
+
+
+class UserUpdate(BaseModel):
+    """Every field optional: the admin UI sends only what changed."""
+    full_name: str | None = None
+    role: str | None = None
+    is_active: bool | None = None
+    password: str | None = None   # admin reset; the user is signed out everywhere
+
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
 
 
 class TokenResponse(BaseModel):
@@ -48,6 +71,11 @@ class ScreenPublic(BaseModel):
     created_at: float
     playlist_id: int | None = None
     playlist_name: str | None = None
+    # The assigned playlist is the one on air. A screen whose playlist is not
+    # idles, so "assigned" alone must not be reported as "playing".
+    playlist_on_air: bool = False
+    # Seen within SCREEN_ONLINE_SECONDS, judged on the server clock.
+    online: bool = False
     user_id: int | None = None
     account_name: str | None = None
     account_username: str | None = None
@@ -73,11 +101,12 @@ class Creative(BaseModel):
     target_gender: str = "all"
     target_crowd: str = "all"        # "all" | "single" | "group" | "crowd"
     target_weather: str = "all"      # "all" | "sunny" | "cloudy" | "rainy"
-    target_pet: str = "all"          # "all" | "none" | "yes" | "dog" | "cat"
+    target_pet: str = "all"          # "all" | "none" | "yes" | a pet_tracker.ANIMALS value
     target_clothing: str = "all"     # "all" | color name (e.g. "Black", "Red")
     target_style: str = "all"        # "all" | "Formal" | "Sport" | "Casual"
     category: str = "Chung"
     description: str = ""
+    user_id: int | None = None       # owning account
 
 
 class CreativeUpdate(BaseModel):
@@ -132,13 +161,15 @@ class AdRecommendation(BaseModel):
     match_score: float = 0.0          # 0.0 to 100.0%
     viewer_age_group: str | None = None
     viewer_gender: str | None = None
+    viewer_gender_share: float = 0.0   # 0..1 of the audience with viewer_gender
+    viewer_age_share: float = 0.0      # 0..1 of the audience in viewer_age_group
     viewer_approx_age: int | None = None
     crowd_context: str | None = None   # "single" | "group" | "crowd"
     people_count: int = 0
     scene_weather: str | None = None
     scene_objects: list[str] = []
     has_pet: bool = False
-    pet_type: str | None = None        # "dog" | "cat"
+    pet_type: str | None = None        # pet_tracker.ANIMALS value
     scene_pets: list[str] = []
     clothing_color: str | None = None
     clothing_style: str | None = None
@@ -167,6 +198,11 @@ class PlaylistItemPublic(BaseModel):
     creative: Creative
 
 
+class PlaylistCover(BaseModel):
+    kind: str
+    url: str
+
+
 class PlaylistPublic(BaseModel):
     id: int
     name: str
@@ -180,9 +216,11 @@ class PlaylistPublic(BaseModel):
     created_at: float
     item_count: int = 0
     total_duration: float = 0.0
+    covers: list[PlaylistCover] = []
     items: list[PlaylistItemPublic] = []
     assigned_screen_ids: list[int] = []
     assigned_screen_names: list[str] = []
+    user_id: int | None = None       # owning account
 
 
 class PlaylistActivateRequest(BaseModel):
@@ -220,6 +258,11 @@ class PlaylistItemOrder(BaseModel):
     item_ids: list[int]
 
 
+class PlaylistItemsReplace(BaseModel):
+    """The whole ordered item list, as the editor has it, saved in one go."""
+    items: list[PlaylistItemAdd]
+
+
 class AdDecisionLog(BaseModel):
     timestamp: str
     creative_id: int
@@ -231,7 +274,16 @@ class AdDecisionLog(BaseModel):
     reason: str | None = None
 
 
+class NextUp(BaseModel):
+    """The advert the player will cut to next, and why."""
+    creative: Creative
+    mode: str = "rotation"            # "cut_in" | "smart" | "rotation"
+    match_score: float | None = None  # 0..100, smart/cut_in only
+
+
 class NowPlaying(BaseModel):
+    next_up: NextUp | None = None
+    current_fit: float | None = None   # 0..100, fit of the advert on screen
     airing_id: int | None = None
     creative: Creative | None = None
     started_at: float | None = None
@@ -252,7 +304,7 @@ class LiveTrack(BaseModel):
     attention: int = 0
     dwell_time: float = 0.0
     has_pet: bool = False
-    pet_type: str | None = None        # "dog" | "cat"
+    pet_type: str | None = None        # pet_tracker.ANIMALS value
     clothing_color: str | None = None  # e.g. "Black", "Red", "Blue"
     clothing_style: str | None = None  # "Formal" | "Sport" | "Casual"
 

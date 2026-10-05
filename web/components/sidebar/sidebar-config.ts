@@ -12,6 +12,5 @@ export const SIDEBAR_NAV_ITEMS: SidebarItem[] = [
 ];
 
 export const SECONDARY_ITEMS = [
-  { href: "/screen", label: "Màn hình TV Client" },
   { href: "/homescreen", label: "Homescreen Display" },
 ];

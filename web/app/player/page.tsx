@@ -1,7 +1,5 @@
-"use client";
-
-import ScreenPage from "@/app/screen/page";
+import { redirect } from "next/navigation";
 
 export default function PlayerPage() {
-  return <ScreenPage />;
+  redirect("/homescreen");
 }

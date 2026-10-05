@@ -38,7 +38,7 @@ class PersonMeta:
     attention: int = 0
     dwell_time: float = 0.0
     has_pet: bool = False
-    pet_type: str | None = None       # "dog" | "cat"
+    pet_type: str | None = None       # pet_tracker.ANIMALS value: "dog", "cat", "bird", …
     pet_box: tuple[int, int, int, int] | None = None
     clothing_color: str | None = None # e.g. "Black", "White", "Blue", "Red"
     clothing_style: str | None = None # "Formal" | "Sport" | "Casual"
@@ -75,7 +75,7 @@ class Pipeline:
         self._clothing_cache: dict[int, tuple[str, str]] = {}  # track_id -> (color, style)
         self._track_frames: dict[int, int] = {}  # track_id -> frame_count
         self._last_seen: dict[int, float] = {}
-        self._ag_executor = ThreadPoolExecutor(max_workers=1)
+        self._ag_executor: ThreadPoolExecutor | None = ThreadPoolExecutor(max_workers=1)
         self._ag_in_flight: set[int] = set()
         self._pose_cache: dict[int, HeadPose] = {}
         # Which scene the age worker's result belongs to. reset() bumps it, so an
@@ -105,7 +105,47 @@ class Pipeline:
         self._pose_cache.clear()
         self.latest_pets.clear()
 
+    def warmup(self) -> None:
+        """Load every model and run each once on dummy input, before any real frame.
+
+        Every stage loads lazily, so without this the first seconds of a live run
+        pay for it: measured on an M3, frame 0 took 1.2s (YOLO load + first MPS
+        pass) and the first face another 1.7s (MediaPipe graph + MiVOLO load,
+        the latter holding the GIL from the worker thread), with 100-150ms
+        stragglers after that. A camera feed turns that into a frozen picture and
+        a burst of dropped frames. Paying it here moves it to before capture.
+
+        Both common frame shapes are warmed because YOLO's letterbox output shape
+        follows the aspect ratio, and a new shape costs MPS another slow first pass.
+        """
+        long = self.cfg.process_long_side
+        for short in (long * 9 // 16, long * 3 // 4):   # 16:9 webcam, 4:3 webcam
+            blank = np.zeros((short, long, 3), dtype=np.uint8)
+            for _ in range(2):
+                self.tracker.update(blank)
+            if self.pet_tracker is not None and self.pet_tracker._ensure_model():
+                self.pet_tracker._detect(blank)
+        # A blank frame produced no tracks, but the tracker still counted frames.
+        self.tracker.reset()
+
+        face = np.full((112, 112, 3), 128, dtype=np.uint8)
+        self.head_pose.estimate(face)
+        if self.cfg.age_enabled:
+            for _ in range(2):
+                self.age_gender.estimate(face)
+
     def start(self):
+        # A Pipeline can be started again after stop() — the server keeps one
+        # warmed instance for its whole life rather than reloading every model on
+        # each capture start. stop() retired the worker and the VLM thread, so
+        # replace them. SceneVLM's weights are shared at class level; a new
+        # instance is cheap, and reusing the old one could leave its previous
+        # worker (still mid-query when stop() gave up joining) running beside
+        # the new one.
+        if self._ag_executor is None:
+            self._ag_executor = ThreadPoolExecutor(max_workers=1)
+            if self.cfg.vlm_enabled:
+                self.vlm = SceneVLM()
         if self.vlm:
             self.vlm.start()
 
@@ -117,7 +157,9 @@ class Pipeline:
         # the pipeline finished and must not be written.
         with self._ag_lock:
             self._ag_epoch += 1
-        self._ag_executor.shutdown(wait=False)
+        if self._ag_executor is not None:
+            self._ag_executor.shutdown(wait=False)
+            self._ag_executor = None
 
     @property
     def latest_context(self):
@@ -158,12 +200,27 @@ class Pipeline:
         age model badly needs. When the caller hands us the original frame, scale
         the bbox back up and crop from there instead.
         """
+        # Equal shapes still means frame_bgr, not source_frame: preprocess may have
+        # applied CLAHE, and the age model should see the same pixels the detector did.
         if source_frame is None or source_frame.shape == frame_bgr.shape:
             return crop_face(frame_bgr, bbox)
+        return crop_face(source_frame, self._scale_bbox(frame_bgr, source_frame, bbox))
+
+    @staticmethod
+    def _scale_bbox(frame_bgr: np.ndarray, source_frame: np.ndarray,
+                    bbox: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+        """Move a bbox from the detection frame's coordinates into source_frame's.
+
+        Every bbox in a PersonMeta is in the downscaled frame tracking ran on, so
+        anything that reads pixels out of the original frame must come through
+        here first. Skipping it samples a different part of the picture entirely.
+        """
+        if source_frame.shape == frame_bgr.shape:
+            return bbox
         sy = source_frame.shape[0] / frame_bgr.shape[0]
         sx = source_frame.shape[1] / frame_bgr.shape[1]
         x1, y1, x2, y2 = bbox
-        return crop_face(source_frame, (int(x1 * sx), int(y1 * sy), int(x2 * sx), int(y2 * sy)))
+        return (int(x1 * sx), int(y1 * sy), int(x2 * sx), int(y2 * sy))
 
     def _async_estimate(self, track_id: int, face_bgr: np.ndarray, epoch: int) -> None:
         """Run heavyweight MiVOLO ONNX inference in background worker thread."""
@@ -188,7 +245,8 @@ class Pipeline:
             or (len(samples) < self.cfg.age_gender_samples
                 and self._frame_idx % self.cfg.age_gender_every_n == 0)
         )
-        if due and track_id not in self._ag_in_flight and face_bgr is not None and face_bgr.size > 0:
+        if (due and self._ag_executor is not None and track_id not in self._ag_in_flight
+                and face_bgr is not None and face_bgr.size > 0):
             with self._ag_lock:
                 self._ag_in_flight.add(track_id)
                 epoch = self._ag_epoch
@@ -306,7 +364,9 @@ class Pipeline:
                     clothing_color, clothing_style = self._clothing_cache[tid]
                 elif self._track_frames[tid] >= getattr(self.cfg, "clothing_min_samples", 4):
                     anal_frame = source_frame if source_frame is not None else frame_bgr
-                    det = self.clothing_tracker.analyze(anal_frame, t.bbox)
+                    det = self.clothing_tracker.analyze(
+                        anal_frame, self._scale_bbox(frame_bgr, anal_frame, t.bbox)
+                    )
                     if det is not None:
                         clothing_color, clothing_style = det.color_name, det.style
                         self._clothing_cache[tid] = (clothing_color, clothing_style)

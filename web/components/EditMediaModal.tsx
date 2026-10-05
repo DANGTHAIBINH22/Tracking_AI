@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import {
   Creative,
   api,
@@ -9,12 +9,12 @@ import {
 import {
   AGE_OPTIONS,
   CATEGORY_OPTIONS,
-  CROWD_OPTIONS,
   GENDER_OPTIONS,
   PET_OPTIONS,
   STYLE_OPTIONS,
   WEATHER_OPTIONS,
 } from "@/lib/taxonomy";
+import { TargetMultiSelect } from "@/components/TargetMultiSelect";
 import {
   IconClose,
   IconImage,
@@ -36,39 +36,24 @@ export function EditMediaModal({
   media,
   onSaveSuccess,
 }: EditMediaModalProps) {
-  const [name, setName] = useState("");
-  const [duration, setDuration] = useState<number>(10);
-  const [category, setCategory] = useState("Chung");
-  const [targetAgeGroup, setTargetAgeGroup] = useState("all");
-  const [targetGender, setTargetGender] = useState("all");
-  const [targetCrowd, setTargetCrowd] = useState("all");
-  const [targetWeather, setTargetWeather] = useState("all");
-  const [targetPet, setTargetPet] = useState("all");
-  const [targetStyle, setTargetStyle] = useState("all");
-  const [description, setDescription] = useState("");
+  // Form fields start from `media`. The parent keys this component by the
+  // media id, so opening another creative remounts it with fresh fields —
+  // no effect copying props into state after the first paint.
+  const [name, setName] = useState(media?.name || "");
+  const [duration, setDuration] = useState<number>(media?.duration || 10);
+  const [category, setCategory] = useState(media?.category || "Chung");
+  const [targetAgeGroup, setTargetAgeGroup] = useState(media?.target_age_group || "all");
+  const [targetGender, setTargetGender] = useState(media?.target_gender || "all");
+  const [targetWeather, setTargetWeather] = useState(media?.target_weather || "all");
+  const [targetPet, setTargetPet] = useState(media?.target_pet || "all");
+  const [targetStyle, setTargetStyle] = useState(media?.target_style || "all");
+  const [description, setDescription] = useState(media?.description || "");
 
   const [saving, setSaving] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
   const [suggesting, setSuggesting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (media) {
-      setName(media.name || "");
-      setDuration(media.duration || 10);
-      setCategory(media.category || "Chung");
-      setTargetAgeGroup(media.target_age_group || "all");
-      setTargetGender(media.target_gender || "all");
-      setTargetCrowd(media.target_crowd || "all");
-      setTargetWeather(media.target_weather || "all");
-      setTargetPet(media.target_pet || "all");
-      setTargetStyle(media.target_style || "all");
-      setDescription(media.description || "");
-      setError(null);
-      setInfo(null);
-    }
-  }, [media]);
 
   if (!isOpen || !media) return null;
 
@@ -92,7 +77,6 @@ export function EditMediaModal({
         category,
         target_age_group: targetAgeGroup,
         target_gender: targetGender,
-        target_crowd: targetCrowd,
         target_weather: targetWeather,
         target_pet: targetPet,
         target_style: targetStyle,
@@ -113,9 +97,11 @@ export function EditMediaModal({
       setSuggesting(true);
       setError(null);
       const res = await api.suggestTarget(name.trim());
-      if (res.category) setCategory(res.category);
-      if (res.target_age_group) setTargetAgeGroup(res.target_age_group);
-      if (res.target_gender) setTargetGender(res.target_gender);
+      // "all"/"Chung" is the matcher saying it found no keyword, not a
+      // finding — it must not wipe a target the operator already chose.
+      if (res.category && res.category !== "Chung") setCategory(res.category);
+      if (res.target_age_group && res.target_age_group !== "all") setTargetAgeGroup(res.target_age_group);
+      if (res.target_gender && res.target_gender !== "all") setTargetGender(res.target_gender);
       setInfo(`AI gợi ý: ${res.reason || "Đã áp dụng các thông số phù hợp"}`);
     } catch (err) {
       setError((err as Error).message);
@@ -132,7 +118,6 @@ export function EditMediaModal({
       if (res.category) setCategory(res.category);
       if (res.target_age_group) setTargetAgeGroup(res.target_age_group);
       if (res.target_gender) setTargetGender(res.target_gender);
-      if (res.target_crowd) setTargetCrowd(res.target_crowd);
       const noteMsg = res.notes && res.notes.length > 0 ? res.notes.join("; ") : "Đã cập nhật các thuộc tính tự động";
       setInfo(`AI phân tích video (${res.source}): ${noteMsg}`);
     } catch (err) {
@@ -303,23 +288,13 @@ export function EditMediaModal({
             </div>
             <div className="space-y-1.5">
               <label className="text-xs font-bold text-slate-700 block">
-                Độ tuổi mục tiêu
+                Độ tuổi mục tiêu <span className="font-normal text-slate-400">(chọn được nhiều)</span>
               </label>
-              <select
-                value={targetAgeGroup}
-                onChange={(e) => setTargetAgeGroup(e.target.value)}
-                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-800 outline-none focus:bg-white focus:border-emerald-500 transition shadow-2xs cursor-pointer"
-              >
-                {AGE_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+              <TargetMultiSelect value={targetAgeGroup} onChange={setTargetAgeGroup} options={AGE_OPTIONS} />
             </div>
           </div>
 
-          {/* Row 3: Target Gender & Target Crowd */}
+          {/* Row 3: Target Gender */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div className="space-y-1.5">
               <label className="text-xs font-bold text-slate-700 block">
@@ -337,22 +312,11 @@ export function EditMediaModal({
                 ))}
               </select>
             </div>
-            <div className="space-y-1.5">
-              <label className="text-xs font-bold text-slate-700 block">
-                Quy mô đám đông
-              </label>
-              <select
-                value={targetCrowd}
-                onChange={(e) => setTargetCrowd(e.target.value)}
-                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-800 outline-none focus:bg-white focus:border-emerald-500 transition shadow-2xs cursor-pointer"
-              >
-                {CROWD_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-            </div>
+            {/* Crowd size is no longer a tag: the scorer reads it, and the
+                age/gender mix, off the camera. */}
+            <p className="self-end rounded-xl border border-dashed border-slate-200 bg-slate-50/60 px-3 py-2 text-[11px] leading-snug text-slate-500">
+              Quy mô người xem được tự tính từ camera: quảng cáo nhắm đúng nhóm đông nhất trước màn hình sẽ được ưu tiên.
+            </p>
           </div>
 
           {/* Row 4: Target Weather & Target Pet */}
@@ -361,33 +325,13 @@ export function EditMediaModal({
               <label className="text-xs font-bold text-slate-700 block">
                 Bối cảnh thời tiết
               </label>
-              <select
-                value={targetWeather}
-                onChange={(e) => setTargetWeather(e.target.value)}
-                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-800 outline-none focus:bg-white focus:border-emerald-500 transition shadow-2xs cursor-pointer"
-              >
-                {WEATHER_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+              <TargetMultiSelect value={targetWeather} onChange={setTargetWeather} options={WEATHER_OPTIONS} />
             </div>
             <div className="space-y-1.5">
               <label className="text-xs font-bold text-slate-700 block">
                 Thú cưng đi kèm
               </label>
-              <select
-                value={targetPet}
-                onChange={(e) => setTargetPet(e.target.value)}
-                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-800 outline-none focus:bg-white focus:border-emerald-500 transition shadow-2xs cursor-pointer"
-              >
-                {PET_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+              <TargetMultiSelect value={targetPet} onChange={setTargetPet} options={PET_OPTIONS} exclusive={["none"]} />
             </div>
           </div>
 
@@ -397,17 +341,7 @@ export function EditMediaModal({
               <label className="text-xs font-bold text-slate-700 block">
                 Phong cách trang phục
               </label>
-              <select
-                value={targetStyle}
-                onChange={(e) => setTargetStyle(e.target.value)}
-                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs font-medium text-slate-800 outline-none focus:bg-white focus:border-emerald-500 transition shadow-2xs cursor-pointer"
-              >
-                {STYLE_OPTIONS.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+              <TargetMultiSelect value={targetStyle} onChange={setTargetStyle} options={STYLE_OPTIONS} />
             </div>
             <div className="space-y-1.5">
               <label className="text-xs font-bold text-slate-700 block">

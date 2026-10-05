@@ -74,12 +74,11 @@ def draw_person(frame_bgr: np.ndarray, meta) -> None:
 def draw_pet(frame_bgr: np.ndarray, pet) -> None:
     """Draw one PetDetection onto the frame in place."""
     x1, y1, x2, y2 = pet.bbox
-    is_dog = pet.pet_type == "dog"
-    colour = ORANGE if is_dog else CYAN
+    colour = ORANGE if pet.pet_type == "dog" else CYAN
     cv2.rectangle(frame_bgr, (x1, y1), (x2, y2), colour, 2)
 
-    type_str = "Dog" if is_dog else "Cat"
-    label = f"{type_str} {pet.confidence:.2f}"
+    # English on the frame: cv2.putText has no Vietnamese glyphs.
+    label = f"{pet.pet_type.capitalize()} {pet.confidence:.2f}"
     if getattr(pet, "owner_track_id", None) is not None:
         label += f" -> #{pet.owner_track_id}"
 

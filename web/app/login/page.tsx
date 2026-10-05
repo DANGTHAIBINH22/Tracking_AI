@@ -1,59 +1,49 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
 import { api, getAuthToken } from "@/lib/api";
-import { IS_CLERK_ENABLED, useSafeUser } from "@/components/ClerkWrapper";
-import { ClerkSignInCard } from "@/components/ClerkSignInCard";
+
+/** Where to go after signing in: `?next=/some/path`, same-origin paths only. */
+function nextPath(): string {
+  if (typeof window === "undefined") return "/admin";
+  const next = new URLSearchParams(window.location.search).get("next");
+  // Only a local path: an absolute URL here would make the login page an open
+  // redirect to whatever site a crafted link names.
+  return next && next.startsWith("/") && !next.startsWith("//") ? next : "/admin";
+}
 
 export default function LoginPage() {
-  const router = useRouter();
-  const { isSignedIn, isLoaded } = useSafeUser();
-
-  // Automatically switch to 'clerk' tab if returning from Clerk SSO callback
-  const [mode, setMode] = useState<"local" | "clerk">(() => {
-    if (typeof window !== "undefined") {
-      if (
-        window.location.hash.includes("sso-callback") ||
-        window.location.href.includes("__clerk")
-      ) {
-        return "clerk";
-      }
-    }
-    return "local";
-  });
-
-  const [username, setUsername] = useState("admin");
-  const [password, setPassword] = useState("admin123");
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Already signed in with a session the server still accepts: skip the form.
   useEffect(() => {
-    router.replace("/admin");
-  }, [router]);
+    if (!getAuthToken()) return;
+    api
+      .me()
+      .then(() => window.location.replace(nextPath()))
+      .catch(() => undefined);
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!username.trim() || !password.trim()) {
+    if (!username.trim() || !password) {
       setError("Vui lòng nhập đầy đủ tên đăng nhập và mật khẩu.");
       return;
     }
 
     setBusy(true);
     setError(null);
-
     try {
       await api.login({ username: username.trim(), password });
-      window.location.href = "/admin";
+      window.location.href = nextPath();
     } catch (err) {
       setError((err as Error).message || "Đăng nhập thất bại.");
-    } finally {
       setBusy(false);
     }
   };
-
-  const isHandlingSSO =
-    typeof window !== "undefined" && window.location.hash.includes("sso-callback");
 
   return (
     <main className="flex min-h-[85vh] items-center justify-center px-4 py-12">
@@ -70,102 +60,57 @@ export default function LoginPage() {
           </p>
         </div>
 
-        {isHandlingSSO && (
-          <div className="mt-4 rounded-xl border border-blue-200 bg-blue-50 p-3 text-center text-xs text-blue-700 animate-pulse">
-            Đang hoàn tất xác thực Clerk SSO... vui lòng chờ trong giây lát.
-          </div>
-        )}
-
-        {/* Tab Switcher if Clerk is available */}
-        {IS_CLERK_ENABLED && (
-          <div className="mt-5 grid grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1 text-xs">
-            <button
-              type="button"
-              onClick={() => setMode("local")}
-              className={`rounded-lg py-2 font-medium transition ${
-                mode === "local"
-                  ? "bg-white text-slate-900 shadow-xs font-semibold"
-                  : "text-slate-500 hover:text-slate-900"
-              }`}
-            >
-              Tài khoản Admin
-            </button>
-            <button
-              type="button"
-              onClick={() => setMode("clerk")}
-              className={`rounded-lg py-2 font-medium transition ${
-                mode === "clerk"
-                  ? "bg-white text-slate-900 shadow-xs font-semibold"
-                  : "text-slate-500 hover:text-slate-900"
-              }`}
-            >
-              Clerk (Google/Email)
-            </button>
-          </div>
-        )}
-
-        {/* Mode 1: Local Admin Form */}
-        <div className={mode === "local" ? "block" : "hidden"}>
-          <form onSubmit={handleSubmit} className="mt-5 space-y-4">
-            {error && (
-              <div className="rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2 text-xs text-rose-700">
-                {error}
-              </div>
-            )}
-
-            <div>
-              <label className="mb-1 block text-xs font-semibold text-slate-700">
-                Tên đăng nhập
-              </label>
-              <input
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                required
-                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 outline-none transition focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
-                placeholder="admin"
-              />
+        <form onSubmit={handleSubmit} className="mt-5 space-y-4">
+          {error && (
+            <div className="rounded-xl border border-rose-200 bg-rose-50 px-3.5 py-2 text-xs text-rose-700">
+              {error}
             </div>
+          )}
 
-            <div>
-              <label className="mb-1 block text-xs font-semibold text-slate-700">
-                Mật khẩu
-              </label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 outline-none transition focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
-                placeholder="••••••••"
-              />
-            </div>
-
-            <button
-              type="submit"
-              disabled={busy}
-              className="w-full rounded-lg bg-emerald-600 py-2.5 text-xs font-semibold text-white shadow-xs transition hover:bg-emerald-700 disabled:opacity-50"
-            >
-              {busy ? "Đang xác thực..." : "Đăng nhập hệ thống"}
-            </button>
-
-            <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-3 text-center text-[11px] text-slate-600">
-              <p className="font-semibold text-slate-800">Tài khoản quản trị mặc định:</p>
-              <p className="mt-1">
-                Username: <code className="font-mono font-bold text-emerald-700 bg-emerald-50 border border-emerald-200/60 px-1 py-0.5 rounded">admin</code> · Password:{" "}
-                <code className="font-mono font-bold text-emerald-700 bg-emerald-50 border border-emerald-200/60 px-1 py-0.5 rounded">admin123</code>
-              </p>
-            </div>
-          </form>
-        </div>
-
-        {/* Mode 2: Clerk Login Card */}
-        {/* We keep this mounted so Clerk can catch SSO callback hash regardless of tab */}
-        {IS_CLERK_ENABLED && (
-          <div className={mode === "clerk" ? "mt-5 block" : "hidden"}>
-            <ClerkSignInCard />
+          <div>
+            <label htmlFor="login-username" className="mb-1 block text-xs font-semibold text-slate-700">
+              Tên đăng nhập
+            </label>
+            <input
+              id="login-username"
+              type="text"
+              autoComplete="username"
+              autoFocus
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              required
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 outline-none transition focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+            />
           </div>
-        )}
+
+          <div>
+            <label htmlFor="login-password" className="mb-1 block text-xs font-semibold text-slate-700">
+              Mật khẩu
+            </label>
+            <input
+              id="login-password"
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 outline-none transition focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
+              placeholder="••••••••"
+            />
+          </div>
+
+          <button
+            type="submit"
+            disabled={busy}
+            className="w-full rounded-lg bg-emerald-600 py-2.5 text-xs font-semibold text-white shadow-xs transition hover:bg-emerald-700 disabled:opacity-50"
+          >
+            {busy ? "Đang xác thực..." : "Đăng nhập hệ thống"}
+          </button>
+
+          <p className="text-center text-[11px] text-slate-500">
+            Chưa có tài khoản hoặc quên mật khẩu? Liên hệ quản trị viên để được cấp hoặc đặt lại.
+          </p>
+        </form>
       </div>
     </main>
   );

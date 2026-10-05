@@ -154,7 +154,7 @@ class AgeGenderEstimator:
             try:
                 import torch
                 from mivolo.model.mi_volo import MiVOLO
-                dev = CFG.device if hasattr(CFG, "device") else ("mps" if torch.backends.mps.is_available() else "cpu")
+                dev = CFG.age_device or CFG.device
                 self._torch_model = MiVOLO(str(ckpt_path), device=dev, half=(dev != "cpu"))
                 self._mode = "torch"
                 self._input_size = self._torch_model.input_size

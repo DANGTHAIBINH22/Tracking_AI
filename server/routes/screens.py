@@ -11,13 +11,17 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from server import db
-from server.auth import get_current_user
+from server.auth import fetch_owned, get_current_user, scope
 from server.schemas import (
     ScreenPairRequest,
     ScreenPublic,
     ScreenRegisterResponse,
     ScreenStatusResponse,
 )
+
+# The TV polls verify-token every few seconds, which stamps last_seen; a screen
+# silent for longer than this is off, asleep or has lost the network.
+SCREEN_ONLINE_SECONDS = 30.0
 
 router = APIRouter(prefix="/api/screens", tags=["screens"])
 
@@ -27,9 +31,7 @@ CODE_LIFETIME = 15 * 60  # 15 minutes
 
 
 def _generate_code() -> str:
-    part1 = "".join(secrets.choice(CODE_CHARS) for _ in range(3))
-    part2 = "".join(secrets.choice(CODE_CHARS) for _ in range(3))
-    return f"{part1}-{part2}"
+    return "".join(secrets.choice(CODE_CHARS) for _ in range(6))
 
 
 def _normalize_code(code: str) -> str:
@@ -53,7 +55,7 @@ def register_screen_code() -> ScreenRegisterResponse:
         if not existing:
             break
     else:
-        code = f"{secrets.token_hex(2).upper()}-{secrets.token_hex(2).upper()}"
+        code = "".join(secrets.choice(CODE_CHARS) for _ in range(6))
 
     db.insert(
         """INSERT INTO screens (pairing_code, code_expires, status, created_at, last_seen)
@@ -101,7 +103,7 @@ def verify_screen_token(token: str = Query(...)) -> dict:
     now = time.time()
     row = db.query_one(
         """SELECT s.id, s.name, s.location, s.status, s.playlist_id, s.user_id,
-                  p.name AS playlist_name,
+                  p.name AS playlist_name, COALESCE(p.is_active, FALSE) AS playlist_on_air,
                   COALESCE(u.full_name, u.username, 'Quản trị viên') AS account_name,
                   u.username AS account_username
            FROM screens s
@@ -121,6 +123,10 @@ def verify_screen_token(token: str = Query(...)) -> dict:
         "location": row["location"],
         "playlist_id": row["playlist_id"],
         "playlist_name": row["playlist_name"],
+        # Only one playlist is on air system-wide. A screen shows it only when
+        # it is the playlist assigned to that screen; otherwise it idles, so an
+        # account's screens never display another account's adverts.
+        "on_air": bool(row["playlist_on_air"]),
         "user_id": row["user_id"],
         "account_name": row["account_name"],
         "account_username": row["account_username"],
@@ -132,15 +138,23 @@ def verify_screen_token(token: str = Query(...)) -> dict:
 
 @router.get("", response_model=list[ScreenPublic])
 def list_screens(user: Annotated[dict, Depends(get_current_user)]) -> list[ScreenPublic]:
-    """List all registered screens, including account owner details."""
+    """The screens this account manages (all of them, for an admin).
+
+    Only paired screens: a pending row is a code reservation that the TV keeps
+    alive by polling /check-status, so its last_seen would read as "Online"
+    for a device nobody has connected yet.
+    """
+    cond, params = scope(user, "s.user_id")
     rows = db.query(
-        """SELECT s.*, p.name AS playlist_name,
+        """SELECT s.*, p.name AS playlist_name, COALESCE(p.is_active, FALSE) AS playlist_on_air,
                   COALESCE(u.full_name, u.username, 'Quản trị viên') AS account_name,
                   u.username AS account_username
            FROM screens s
            LEFT JOIN playlists p ON s.playlist_id = p.id
            LEFT JOIN users u ON s.user_id = u.id
-           ORDER BY s.id DESC"""
+           WHERE {cond} AND s.status = 'paired'
+           ORDER BY s.id DESC""".format(cond=cond),
+        params,
     )
     return [
         ScreenPublic(
@@ -153,6 +167,8 @@ def list_screens(user: Annotated[dict, Depends(get_current_user)]) -> list[Scree
             created_at=r["created_at"],
             playlist_id=r.get("playlist_id"),
             playlist_name=r.get("playlist_name"),
+            playlist_on_air=bool(r.get("playlist_on_air")),
+            online=bool(r["last_seen"] and time.time() - r["last_seen"] < SCREEN_ONLINE_SECONDS),
             user_id=r.get("user_id"),
             account_name=r.get("account_name"),
             account_username=r.get("account_username"),
@@ -171,13 +187,22 @@ def pair_screen(
     now = time.time()
 
     row = db.query_one(
-        "SELECT id, status, code_expires FROM screens WHERE REPLACE(pairing_code, '-', '') = %s ORDER BY id DESC LIMIT 1",
+        "SELECT id, status, code_expires, user_id FROM screens WHERE REPLACE(pairing_code, '-', '') = %s ORDER BY id DESC LIMIT 1",
         (norm,),
     )
     if not row:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Không tìm thấy màn hình với mã kết nối '{body.pairing_code}'. Vui lòng kiểm tra lại mã trên màn hình TV.",
+        )
+
+    # A paired screen keeps its old code, and that code never expires for it.
+    # Without this, anyone who once saw the code could re-pair the screen and
+    # take it over from the account that owns it.
+    if row["status"] == "paired" and row["user_id"] not in (None, user["id"]) and user.get("role") != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Màn hình này đã được ghép với tài khoản khác.",
         )
 
     if row["code_expires"] < now and row["status"] != "paired":
@@ -187,7 +212,7 @@ def pair_screen(
         )
 
     screen_token = secrets.token_urlsafe(32)
-    name = body.name.strip() if body.name.strip() else "Màn hình TV"
+    name = body.name.strip() if body.name.strip() else "Màn hình Kiosk"
     location = body.location.strip() if body.location else None
     user_id = user.get("id")
 
@@ -198,8 +223,18 @@ def pair_screen(
         (screen_token, name, location, now, user_id, row["id"]),
     )
 
+    # A screen paired while this account has a playlist on air joins it at
+    # once. Left unassigned, a new screen sat on its idle picture until someone
+    # thought to publish the playlist again.
+    active = db.query_one(
+        "SELECT id FROM playlists WHERE is_active = TRUE AND user_id IS NOT DISTINCT FROM %s LIMIT 1",
+        (user_id,),
+    )
+    if active:
+        db.execute("UPDATE screens SET playlist_id = %s WHERE id = %s", (active["id"], row["id"]))
+
     updated = db.query_one(
-        """SELECT s.*, p.name AS playlist_name,
+        """SELECT s.*, p.name AS playlist_name, COALESCE(p.is_active, FALSE) AS playlist_on_air,
                   COALESCE(u.full_name, u.username, 'Quản trị viên') AS account_name,
                   u.username AS account_username
            FROM screens s
@@ -218,6 +253,8 @@ def pair_screen(
         created_at=updated["created_at"],
         playlist_id=updated.get("playlist_id"),
         playlist_name=updated.get("playlist_name"),
+        playlist_on_air=bool(updated.get("playlist_on_air")),
+        online=True,
         user_id=updated.get("user_id"),
         account_name=updated.get("account_name"),
         account_username=updated.get("account_username"),
@@ -225,7 +262,8 @@ def pair_screen(
 
 
 @router.delete("/{screen_id}")
-def delete_screen(screen_id: int) -> dict:
+def delete_screen(screen_id: int, user: Annotated[dict, Depends(get_current_user)]) -> dict:
     """Revoke or delete a screen."""
+    fetch_owned("screens", screen_id, user, "Không tìm thấy thiết bị.")
     db.execute("DELETE FROM screens WHERE id = %s", (screen_id,))
     return {"ok": True, "deleted_id": screen_id}

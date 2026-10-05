@@ -39,6 +39,10 @@ export type IngestState = {
   sent: number;
 };
 
+/** ImageCapture as Chromium ships it; TypeScript's DOM lib omits grabFrame. */
+type FrameGrabber = { grabFrame(): Promise<ImageBitmap> };
+const FrameGrabberCtor = (globalThis as unknown as { ImageCapture?: new (track: MediaStreamTrack) => FrameGrabber }).ImageCapture;
+
 const IDLE_HEARTBEAT_MS = 1000;   // while the engine is stopped, just stay in touch
 const RETRY_REJECTED_MS = 10000;  // the other screen may go away; check back
 const MAX_BUFFERED_BYTES = 1_000_000;
@@ -55,6 +59,11 @@ export function useCameraIngest(enabled: boolean) {
   // Everything the send loop touches lives in refs: re-rendering on every frame
   // would be 12 React renders a second for numbers nobody reads that fast.
   const streamRef = useRef<MediaStream | null>(null);
+  // Reads frames straight off the camera track (Chromium: Chrome, Edge, Arc).
+  // The <video> element is not painted while its tab is hidden or its window
+  // is covered, so sampling it from a background /homescreen tab sent the same
+  // stale frame, or none, about once a second (measured: 0.8 fps live).
+  const grabberRef = useRef<FrameGrabber | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const sentRef = useRef(0);
@@ -67,12 +76,18 @@ export function useCameraIngest(enabled: boolean) {
     setState((prev) => ({ ...prev, ...next }));
   }, []);
 
+  // Reset the state when switched off, not just the ref: without this the
+  // panel keeps reporting "đang gửi · 11 fps" after the camera is off. Done
+  // during render (React's "adjust state on prop change"), not in the effect.
+  const [wasEnabled, setWasEnabled] = useState(enabled);
+  if (wasEnabled !== enabled) {
+    setWasEnabled(enabled);
+    if (!enabled) setState({ phase: "idle", detail: null, fps: 0, sent: 0 });
+  }
+
   useEffect(() => {
     if (!enabled) {
       phaseRef.current = "idle";
-      // Reset the state, not just the ref: without this the panel keeps
-      // reporting "đang gửi · 11 fps" after the camera has been switched off.
-      setState({ phase: "idle", detail: null, fps: 0, sent: 0 });
       return;
     }
 
@@ -90,35 +105,119 @@ export function useCameraIngest(enabled: boolean) {
       if (!disposed) timer = setTimeout(fn, ms);
     };
 
-    /** One frame: video -> canvas (downscaled) -> JPEG -> socket. */
-    const grabAndSend = async () => {
+    /** The newest camera frame: off the track when the browser can, from the
+     *  <video> element otherwise (Safari, Firefox). */
+    // The worker keeps the clock and, where the browser allows, does the JPEG
+    // encoding. Both matter for a hidden tab (the operator on /admin while
+    // /homescreen runs in another tab): Chrome throttles a background page's
+    // timers and runs canvas.toBlob as an idle task, about once a second there.
+    // Measured before this: 25 fps for 30s, then a 6s stall, then exactly 1 fps.
+    // A dedicated worker is not throttled, and OffscreenCanvas.convertToBlob in
+    // it does not wait for the page to be idle.
+    const WORKER_SRC = `
+      let timer = null, canvas = null, ctx = null;
+      self.onmessage = async function (e) {
+        const d = e.data;
+        if (d.cmd === 'start') {
+          if (timer) clearInterval(timer);
+          timer = setInterval(function () { self.postMessage({ type: 'tick' }); }, d.interval);
+        } else if (d.cmd === 'stop') {
+          if (timer) clearInterval(timer);
+          timer = null;
+        } else if (d.cmd === 'encode') {
+          const bmp = d.bitmap;
+          try {
+            const scale = Math.min(1, d.maxWidth / bmp.width);
+            const w = Math.round(bmp.width * scale), h = Math.round(bmp.height * scale);
+            if (!canvas || canvas.width !== w || canvas.height !== h) {
+              canvas = new OffscreenCanvas(w, h);
+              ctx = canvas.getContext('2d');
+            }
+            ctx.drawImage(bmp, 0, 0, w, h);
+            const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: d.quality });
+            const buf = await blob.arrayBuffer();
+            self.postMessage({ type: 'jpeg', buf: buf }, [buf]);
+          } catch (err) {
+            self.postMessage({ type: 'jpeg', buf: null });
+          } finally {
+            bmp.close();
+          }
+        }
+      };`;
+
+    let worker: Worker | null = null;
+    try {
+      worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: "application/javascript" })));
+    } catch {
+      worker = null;
+    }
+    const encodeInWorker =
+      worker !== null && typeof OffscreenCanvas !== "undefined" && typeof createImageBitmap !== "undefined";
+    let pendingJpeg: ((buf: ArrayBuffer | null) => void) | null = null;
+
+    /** The newest camera frame as a bitmap: off the track where the browser
+     *  can (Chromium), else from the <video> element (Safari, Firefox — those
+     *  only paint it while the tab is visible). */
+    const grabBitmap = async (): Promise<ImageBitmap | null> => {
+      const grabber = grabberRef.current;
+      if (grabber) {
+        try {
+          return await grabber.grabFrame();
+        } catch {
+          // track muted/ended or a grab already pending: try the element
+        }
+      }
       const video = videoRef.current;
-      const ws = socketRef.current;
-      if (disposed || !video || !ws || ws.readyState !== WebSocket.OPEN) return;
-      if (!video.videoWidth || !video.videoHeight) return;
+      if (!video || !video.videoWidth || !video.videoHeight) return null;
+      return createImageBitmap(video);
+    };
 
-      // Skip rather than queue when the link is congested. A stale frame helps
-      // nobody: the engine only ever looks at the newest one it has.
-      if (ws.bufferedAmount > MAX_BUFFERED_BYTES) return;
-
+    /** Frame -> JPEG bytes: in the worker when possible, on the page otherwise. */
+    const encodeJpeg = async (): Promise<ArrayBuffer | Blob | null> => {
+      if (encodeInWorker && worker) {
+        const bitmap = await grabBitmap();
+        if (!bitmap) return null;
+        const w = worker;
+        return new Promise<ArrayBuffer | null>((resolve) => {
+          pendingJpeg = resolve;
+          w.postMessage({ cmd: "encode", bitmap, maxWidth, quality }, [bitmap]);
+          // Never let one lost reply wedge the loop (inFlight would stay set).
+          setTimeout(() => {
+            if (pendingJpeg === resolve) {
+              pendingJpeg = null;
+              resolve(null);
+            }
+          }, 2000);
+        });
+      }
+      const video = videoRef.current;
+      if (!video || !video.videoWidth || !video.videoHeight) return null;
       const scale = Math.min(1, maxWidth / video.videoWidth);
       const w = Math.round(video.videoWidth * scale);
       const h = Math.round(video.videoHeight * scale);
-
       const canvas = (canvasRef.current ??= document.createElement("canvas"));
       if (canvas.width !== w || canvas.height !== h) {
         canvas.width = w;
         canvas.height = h;
       }
       const ctx = canvas.getContext("2d");
-      if (!ctx) return;
+      if (!ctx) return null;
       ctx.drawImage(video, 0, 0, w, h);
+      return new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/jpeg", quality));
+    };
 
-      const blob = await new Promise<Blob | null>((resolve) =>
-        canvas.toBlob(resolve, "image/jpeg", quality),
-      );
-      if (!blob || disposed || ws.readyState !== WebSocket.OPEN) return;
-      ws.send(blob);
+    /** One frame: camera -> JPEG -> socket. */
+    const grabAndSend = async () => {
+      const ws = socketRef.current;
+      if (disposed || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+      // Skip rather than queue when the link is congested. A stale frame helps
+      // nobody: the engine only ever looks at the newest one it has.
+      if (ws.bufferedAmount > MAX_BUFFERED_BYTES) return;
+
+      const jpeg = await encodeJpeg();
+      if (!jpeg || disposed || ws.readyState !== WebSocket.OPEN) return;
+      ws.send(jpeg);
 
       sentRef.current += 1;
       const now = performance.now();
@@ -130,29 +229,21 @@ export function useCameraIngest(enabled: boolean) {
       }
     };
 
-    let worker: Worker | null = null;
-    try {
-      const blob = new Blob([
-        `let timer = null;
-         self.onmessage = function(e) {
-           if (e.data.cmd === 'start') {
-             if (timer) clearInterval(timer);
-             timer = setInterval(function() { self.postMessage('tick'); }, e.data.interval);
-           } else if (e.data.cmd === 'stop') {
-             if (timer) clearInterval(timer);
-             timer = null;
-           }
-         };`
-      ], { type: "application/javascript" });
-      worker = new Worker(URL.createObjectURL(blob));
+    if (worker) {
       let inFlight = false;
-      worker.onmessage = () => {
+      worker.onmessage = (e: MessageEvent<{ type: string; buf?: ArrayBuffer | null }>) => {
+        if (e.data.type === "jpeg") {
+          const resolve = pendingJpeg;
+          pendingJpeg = null;
+          resolve?.(e.data.buf ?? null);
+          return;
+        }
         if (disposed || inFlight) return;
         inFlight = true;
-        grabAndSend().finally(() => { inFlight = false; });
+        grabAndSend().finally(() => {
+          inFlight = false;
+        });
       };
-    } catch {
-      worker = null;
     }
 
     const pump = () => {
@@ -238,6 +329,10 @@ export function useCameraIngest(enabled: boolean) {
           return;
         }
         streamRef.current = stream;
+        const track = stream.getVideoTracks()[0];
+        if (track && FrameGrabberCtor) {
+          grabberRef.current = new FrameGrabberCtor(track);
+        }
         const video = videoRef.current;
         if (video) {
           video.srcObject = stream;
@@ -280,6 +375,7 @@ export function useCameraIngest(enabled: boolean) {
       // camera stays claimed until the tab is closed.
       streamRef.current?.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
+      grabberRef.current = null;
       if (videoEl) videoEl.srcObject = null;
     };
   }, [enabled, patch]);

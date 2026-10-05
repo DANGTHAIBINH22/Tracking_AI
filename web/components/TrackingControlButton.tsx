@@ -9,12 +9,15 @@ interface TrackingControlButtonProps {
   className?: string;
   showFps?: boolean;
   source?: string;
+  /** "icon": a round play/pause button with the FPS as a corner badge, for the dock. */
+  variant?: "default" | "icon";
 }
 
 export function TrackingControlButton({
   className = "",
   showFps = true,
   source,
+  variant = "default",
 }: TrackingControlButtonProps) {
   const { stats } = useLive();
   const [busy, setBusy] = useState(false);
@@ -60,6 +63,29 @@ export function TrackingControlButton({
       setBusy(false);
     }
   };
+
+  if (variant === "icon") {
+    return (
+      <button
+        type="button"
+        onClick={handleToggle}
+        disabled={busy}
+        aria-label={isRunning ? "Tạm dừng tracking" : "Bắt đầu tracking"}
+        className={`relative flex h-9 w-9 items-center justify-center rounded-full transition disabled:opacity-50 ${
+          isRunning
+            ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-300 hover:bg-emerald-100"
+            : "bg-emerald-600 text-white hover:bg-emerald-700"
+        } ${className}`}
+      >
+        {isRunning ? <IconPause className="h-4 w-4" /> : <IconPlay className="h-4 w-4" />}
+        {isRunning && (
+          <span className="absolute -right-1.5 -top-1.5 rounded-full bg-emerald-600 px-1 font-mono text-[9px] font-bold leading-4 text-white">
+            {fps.toFixed(0)}
+          </span>
+        )}
+      </button>
+    );
+  }
 
   if (isRunning) {
     return (

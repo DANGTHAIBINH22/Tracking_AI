@@ -50,7 +50,9 @@ class ServerSettings:
     # than baked into the page. 12 fps at 960px is enough for tracking a person
     # walking past and small enough to survive shop wifi.
     ingest_target_fps: float = 25.0
-    ingest_max_width: int = 640
+    # Matches configs.CFG.process_long_side: sending less throws away the
+    # detail the face detector needs for anyone not right at the screen.
+    ingest_max_width: int = 960
     ingest_jpeg_quality: float = 0.65
     # A publisher that has gone this long without a frame has lost its claim, so
     # a crashed tab cannot hold the screen hostage until someone restarts.

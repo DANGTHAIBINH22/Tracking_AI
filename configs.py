@@ -41,7 +41,14 @@ def pick_device() -> str:
 class Config:
     # ---- input source ----
     camera_index: int = 0  # webcam id for run_webcam.py
-    process_long_side: int = 640  # 2.1 resize target for the long edge
+    # 2.1 resize target for the long edge. Also the detector's input size (see
+    # tracker.py). 640 made anyone past ~2 m a face of a dozen pixels the
+    # detector never fired on, so a webcam only ever tracked whoever stood
+    # closest. Measured on data/retail (faces/frame, same clips): 640 -> 960
+    # took a street crowd from 0.10 to 2.43 at conf 0.35 for +1 ms per frame.
+    # 1280 found more again but started firing on a billboard face and the
+    # back of a head — not worth it.
+    process_long_side: int = 960
 
     # ---- 2.1 preprocessing ----
     use_clahe: bool = False  # toggle for the CLAHE experiment (mucs 6)
@@ -50,7 +57,11 @@ class Config:
 
     # ---- 2.2 detection (YOLOv8-face via ultralytics) ----
     face_weights: Path = MODELS_DIR / "yolov8n-face.pt"
-    conf_threshold: float = 0.5
+    # 0.5 dropped real but small or turned faces (a second person behind the
+    # first). 0.35 adds them with no false positives on the eval clips; 0.25
+    # began adding some. ByteTrack's new_track_thresh (0.25) sits below this,
+    # so every detection kept here can start a track.
+    conf_threshold: float = 0.35
     iou_threshold: float = 0.5  # NMS
 
     # ---- 2.3 tracking (ByteTrack, ultralytics built-in) ----
@@ -128,11 +139,32 @@ class Config:
 
     # ---- 2.9 pet tracking (Phase 7: Pet & Animal Association) ----
     pet_enabled: bool = True
-    pet_weights: Path = MODELS_DIR / "yolov8n.pt"
-    pet_conf_threshold: float = 0.35
-    pet_detect_every_n: int = 3       # run pet detector every 3 frames to preserve 30 FPS
-    pet_proximity_px: float = 350.0   # max distance (pixels) between person and pet center
-    pet_classes: tuple[int, ...] = (15, 16)  # COCO: 15=cat, 16=dog
+    # YOLO11m (COCO-pretrained). Measured 2026-10-03 on 7 cat / 2 dog / 2 no-animal
+    # Mixkit clips, frames with the animal found: yolov8n@320 cat 17% dog 59%;
+    # yolo11s@640 58% / 95%; yolo11m@640 83% / 99%; no false alarms in any.
+    # 38 ms a pass on M3/MPS, run every pet_detect_every_n frames.
+    pet_weights: Path = MODELS_DIR / "yolo11m.pt"
+    pet_conf_threshold: float = 0.25
+    # Every 6th frame, the last result reused in between: animals do not jump
+    # around. With yolo11m, 3 -> 6 cut the stage from 14.4 to 7.6 ms/frame and
+    # kept the same linked share (cat 100%, dog 97% of frames).
+    pet_detect_every_n: int = 6
+    # Pets are large in frame, so the COCO model runs at half the face detector's
+    # size. At 640 every third frame was a full second YOLO pass, which shows as a
+    # regular stutter (two fast frames, one slow) rather than as a lower average.
+    # 320 was too small for an animal held in the arms or lying in a lap: half
+    # the misses above came from the image size alone (yolov8n 320 -> 640: cat
+    # 17% -> 30%, dog 59% -> 88%).
+    pet_imgsz: int = 640
+    # Max distance from a pet to a person's body, in that person's face heights.
+    # Relative, not pixels: a fixed 525px linked nothing in a close-up (a face
+    # 250px tall puts the estimated feet off-frame, ~870px from a dog held in
+    # the arms) and linked across half the room in a far shot.
+    pet_proximity_faces: float = 2.5
+    pet_body_faces: float = 6.5       # face top to feet, in face heights (standing adult)
+    # Every animal COCO knows: 14 bird, 15 cat, 16 dog, 17 horse, 18 sheep,
+    # 19 cow, 20 elephant, 21 bear, 22 zebra, 23 giraffe. Names: pet_tracker.ANIMALS.
+    pet_classes: tuple[int, ...] = tuple(range(14, 24))
 
     # ---- 2.10 clothing & style tracking (Phase 8: Lightweight Apparel) ----
     clothing_enabled: bool = True
@@ -147,6 +179,12 @@ class Config:
 
     # ---- compute ----
     device: str = field(default_factory=pick_device)
+    # MiVOLO's device; None = `device`. It runs in a background thread a few
+    # times per person, while YOLO runs on every frame. Sharing one MPS queue,
+    # each age estimate stalled the next tracker call (single frames of
+    # 100-350 ms whenever a new face appeared). On the CPU it costs the loop
+    # nothing, and its own extra latency only delays when an age shows up.
+    age_device: str | None = field(default_factory=lambda: os.environ.get("AGE_DEVICE", "cpu") or None)
 
 
 CFG = Config()

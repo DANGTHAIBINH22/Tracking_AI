@@ -69,6 +69,7 @@ class FaceDetector:
                     frame_bgr,
                     conf=CFG.conf_threshold,
                     iou=CFG.iou_threshold,
+                    imgsz=CFG.process_long_side,
                     device=self.device,
                     verbose=False,
                 )

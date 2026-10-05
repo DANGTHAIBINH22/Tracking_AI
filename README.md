@@ -175,7 +175,7 @@ uv run python prepare_models.py --skip-vlm
 
 Nếu muốn thiết lập thủ công từng mô hình, bạn xem hướng dẫn chi tiết tại [**DOWNLOAD_MODELS.md**](DOWNLOAD_MODELS.md):
 *   **YOLOv8-Face (`models/yolov8n-face.pt` - ~6.1MB):** Tự động tải từ Hugging Face khi khởi chạy lần đầu hoặc qua `prepare_models.py`.
-*   **YOLOv8n Pets (`models/yolov8n.pt` - ~6.2MB):** Tự động tải qua `prepare_models.py` phục vụ nhận diện chó & mèo.
+*   **YOLO11m Animals (`models/yolo11m.pt` - ~39MB):** Tự động tải qua `prepare_models.py`, nhận diện 10 loài động vật COCO (chim, mèo, chó, ngựa, cừu, bò, voi, gấu, ngựa vằn, hươu cao cổ).
 *   **MiVOLO v2 ONNX (`models/mivolo_age_gender.onnx` + `.data` - ~112.5MB):** Tự động tải từ Hugging Face Hub và xuất sang chuẩn ONNX khi chạy `prepare_models.py`.
 *   **Moondream2 VLM (`vikhyatk/moondream2` - ~1.6GB):** Tải tự động vào cache Hugging Face khi chuẩn bị với `prepare_models.py` (không dùng cờ `--skip-vlm`).
 

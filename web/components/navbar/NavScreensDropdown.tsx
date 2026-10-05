@@ -16,8 +16,7 @@ export function NavScreensDropdown({ onOpenScreenModal }: NavScreensDropdownProp
   const [isOpen, setIsOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  const isScreensActive =
-    pathname === "/screen" || pathname === "/homescreen";
+  const isScreensActive = pathname === "/homescreen";
 
   // Close on outside click
   useEffect(() => {
@@ -41,10 +40,12 @@ export function NavScreensDropdown({ onOpenScreenModal }: NavScreensDropdownProp
     };
   }, [isOpen]);
 
-  // Close on route change
-  useEffect(() => {
+  // Close on route change (adjusted during render, not in an effect)
+  const [openPath, setOpenPath] = useState(pathname);
+  if (openPath !== pathname) {
+    setOpenPath(pathname);
     setIsOpen(false);
-  }, [pathname]);
+  }
 
   return (
     <div className="relative" ref={dropdownRef}>

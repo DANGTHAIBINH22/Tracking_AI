@@ -42,6 +42,8 @@ export type Creative = {
   target_style?: string;
   category: string;
   description: string;
+  /** Owning account. Non-admins only ever receive their own. */
+  user_id?: number | null;
 };
 
 export type PlaylistItemPublic = {
@@ -67,8 +69,12 @@ export type PlaylistPublic = {
   item_count: number;
   total_duration: number;
   items: PlaylistItemPublic[];
+  /** Up to four thumbnails, filled even when `items` is not loaded. */
+  covers?: { kind: string; url: string }[];
   assigned_screen_ids?: number[];
   assigned_screen_names?: string[];
+  /** Owning account. Non-admins only ever receive their own. */
+  user_id?: number | null;
 };
 
 export type TargetSuggestion = {
@@ -99,6 +105,8 @@ export type AdRecommendation = {
   match_score: number;
   viewer_age_group: string | null;
   viewer_gender: string | null;
+  viewer_gender_share?: number;
+  viewer_age_share?: number;
   viewer_approx_age: number | null;   // whole years
   crowd_context?: string | null;
   people_count?: number;
@@ -112,12 +120,33 @@ export type AdRecommendation = {
   reason: string;
 };
 
+export type UserRole = "admin" | "operator";
+
 export type UserPublic = {
   id: number;
   username: string;
   full_name: string;
-  role: string;
+  /** "admin" manages accounts; "operator" runs the console but cannot. */
+  role: UserRole | string;
+  is_active?: boolean;
+  created_at?: number | null;
+  last_login?: number | null;
 };
+
+export type UserCreate = {
+  username: string;
+  password: string;
+  full_name?: string;
+  role: UserRole;
+};
+
+/** Only the fields being changed; `password` is an admin reset. */
+export type UserUpdate = Partial<{
+  full_name: string;
+  role: UserRole;
+  is_active: boolean;
+  password: string;
+}>;
 
 export type TokenResponse = {
   access_token: string;
@@ -138,6 +167,181 @@ export type ScreenStatusResponse = {
   location: string | null;
 };
 
+export type DayPerson = {
+  seq: number;
+  session_code: string;
+  track_id: number;
+  first_seen: number;
+  last_seen: number;
+  presence_seconds: number;
+  dwell_seconds: number;
+  attentive_share: number;
+  viewed: boolean;
+  gender: "M" | "F" | null;
+  age: number | null;
+  age_group: string | null;
+  has_pet: boolean;
+  pet_type: string | null;
+  clothing_color: string | null;
+  clothing_style: string | null;
+  ads: { name: string; seconds: number }[];
+  /** Videos the person looked at, by attention seconds — not just ones on air. */
+  watched: { name: string; seconds: number }[];
+};
+
+export type OverviewTotals = {
+  sessions: number;
+  people: number;
+  viewed: number;
+  tracked_seconds: number;
+  active_devices: number;
+  reach: number;
+  impressions: number;
+  attention_seconds?: number;
+  airings?: number;
+};
+
+export type OverviewVideo = {
+  creative_id: number;
+  name: string;
+  kind: string;
+  airings: number;
+  seconds_on_screen: number;
+  reach: number;
+  impressions: number;
+  attention_seconds: number;
+  attention_rate: number;
+};
+
+export type OverviewDevice = {
+  device_id: string;
+  name: string;
+  location: string | null;
+  online: boolean;
+  sessions: number;
+  people: number;
+  viewed: number;
+  seconds: number;
+  last: number;
+};
+
+/** /api/analytics/overview: the admin console's period summary. */
+export type Overview = {
+  generated_at: number;
+  days: number;
+  start: number;
+  bucket_seconds: number;
+  devices_total: number;
+  devices_online: number;
+  current: OverviewTotals;
+  previous: OverviewTotals;
+  series: { t: number; sessions: number; people: number; viewed: number; reach: number; impressions: number }[];
+  top_videos: OverviewVideo[];
+  devices: OverviewDevice[];
+  by_gender: Record<string, number>;
+  by_age_group: Record<string, number>;
+};
+
+export type HourlyAudience = {
+  window_hours: number | null;
+  hours: { hour: number; reach: number; impressions: number; attention_seconds: number }[];
+};
+
+export type Funnel = {
+  window_hours: number | null;
+  reach: number;
+  glance: number;
+  impressions: number;
+  engaged: number;
+  min_presence_seconds: number;
+  min_attention_seconds: number;
+  engaged_seconds: number;
+};
+
+export type BreakdownRow = {
+  key: string;
+  name: string;
+  /** Location for a device, media kind for a creative. */
+  sub: string | null;
+  airings: number;
+  seconds_on_screen: number;
+  reach: number;
+  impressions: number;
+  attention_seconds: number;
+  attention_rate: number;
+  sessions: number;
+  people: number;
+  viewed: number;
+  devices: number;
+  /** Looked at all (attention > 0) — the funnel's second stage. */
+  glance: number;
+  /** Looked for at least `engaged_seconds`. */
+  engaged: number;
+};
+
+/** /api/analytics/breakdown: dashboard totals by device, area, media and playlist. */
+export type Breakdown = {
+  window_hours: number | null;
+  generated_at: number;
+  device_id: string | null;
+  min_attention_seconds: number;
+  engaged_seconds: number;
+  /** Looks by the viewer's hour of day, arrival hour. */
+  hours: HourlyAudience["hours"];
+  devices: BreakdownRow[];
+  locations: BreakdownRow[];
+  media: BreakdownRow[];
+  playlists: BreakdownRow[];
+};
+
+/** What one device's camera detected and tracked over a period. */
+export type DetectionStats = {
+  sessions: number;
+  /** Legacy sessions with no per-track ledger: detected/viewed only. */
+  sessions_without_detail: number;
+  tracked_seconds: number;
+  detected: number;
+  /** Faced the screen for at least one frame. */
+  attentive: number;
+  /** Dwell >= min_attention_seconds. */
+  viewed: number;
+  peak_people: number;
+  tracks_with_detail: number;
+  frames: number;
+  male: number;
+  female: number;
+  unknown_gender: number;
+  ages: Record<string, number>;
+  pets: number;
+  pet_types: Record<string, number>;
+  avg_dwell_seconds: number | null;
+  avg_presence_seconds: number | null;
+  attentive_rate: number | null;
+  view_rate: number;
+  people_per_hour: number | null;
+};
+
+export type DetectionDevice = DetectionStats & {
+  device_id: string;
+  name: string;
+  location: string | null;
+  online: boolean;
+};
+
+/** /api/analytics/detection: the detect & tracking module, per device. */
+export type Detection = {
+  generated_at: number;
+  days: number;
+  start: number;
+  bucket_seconds: number;
+  min_attention_seconds: number;
+  totals: DetectionStats;
+  devices: DetectionDevice[];
+  series: { t: number; detected: number; attentive: number; viewed: number }[];
+};
+
+export type DayLog = { date: string; end_date: string; device_id: string; sessions: number; people: DayPerson[] };
+
 export type ScreenPublic = {
   id: number;
   name: string | null;
@@ -148,6 +352,10 @@ export type ScreenPublic = {
   created_at: number;
   playlist_id?: number | null;
   playlist_name?: string | null;
+  /** The assigned playlist is the one on air; otherwise the screen idles. */
+  playlist_on_air?: boolean;
+  /** Seen by the server within the last 30 seconds. */
+  online?: boolean;
   user_id?: number | null;
   account_name?: string | null;
   account_username?: string | null;
@@ -178,6 +386,10 @@ export type NowPlaying = {
   elapsed: number;
   remaining: number;
   playing: boolean;
+  /** What the player will cut to next, chosen exactly as it will be. */
+  /** Fit (0..100) of the advert on screen for the current audience. */
+  current_fit?: number | null;
+  next_up?: { creative: Creative; mode: "cut_in" | "smart" | "rotation"; match_score: number | null } | null;
   ad_logs?: AdDecisionLog[];
   smart_targeting?: boolean;
   cut_in_enabled?: boolean;
@@ -277,6 +489,8 @@ export type CaptureState = {
   source_now?: string | null;
   queue?: string[] | null;
   mode: "server" | "browser";
+  /** The device the running capture belongs to: "host" or a screen id. */
+  device_id?: string | null;
   fps: number;
   error: string | null;
   ingest: IngestStatus;
@@ -389,6 +603,8 @@ export function setStoredUser(user: UserPublic): void {
   } catch {
     // ignore
   }
+  // useStoredUser readers in this tab only learn of the change through this.
+  window.dispatchEvent(new Event("auth-change"));
 }
 
 export function setAuthSession(token: string, user: UserPublic): void {
@@ -416,33 +632,67 @@ export function clearAuthSession(): void {
   window.dispatchEvent(new Event("auth-change"));
 }
 
+/**
+ * Pages a paired screen runs unattended. They never hold an admin session, so a
+ * 401 there must not navigate a shop-window TV to a login form.
+ */
+const KIOSK_PATHS = ["/homescreen", "/player", "/login"];
+
+/** Send the operator to sign in, and back here afterwards. */
+function redirectToLogin(): void {
+  if (typeof window === "undefined") return;
+  const { pathname, search } = window.location;
+  if (KIOSK_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`))) return;
+  window.location.replace(`/login?next=${encodeURIComponent(pathname + search)}`);
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const token = getAuthToken();
   const authHeaders: Record<string, string> = token ? { Authorization: `Bearer ${token}` } : {};
+  const requestHeaders =
+    init?.body instanceof FormData
+      ? { ...authHeaders, ...(init?.headers ?? {}) }
+      : { "Content-Type": "application/json", ...authHeaders, ...(init?.headers ?? {}) };
 
-  let res: Response;
-  try {
-    res = await fetch(`${API_BASE}${path}`, {
-      ...init,
-      headers:
-        init?.body instanceof FormData
-          ? { ...authHeaders, ...(init?.headers ?? {}) }
-          : { "Content-Type": "application/json", ...authHeaders, ...(init?.headers ?? {}) },
-      cache: "no-store",
-    });
-  } catch (err) {
-    // The API being down is the most common failure in development, and it is
-    // the one fetch reports worst: it rejects before any of the status handling
-    // below, so the operator gets a bare "TypeError: Failed to fetch" and a
-    // stack trace pointing into this file rather than at the stopped server.
-    // API_BASE can legitimately be "" (same-origin), and this may run during
-    // SSR, so window is not safe to reach for unguarded.
+  let res: Response | null = null;
+  let lastErr: unknown = null;
+
+  // Build candidate endpoints (primary, 127.0.0.1 IPv4 fallback, and same-origin rewrite fallback)
+  const candidateUrls: string[] = [`${API_BASE}${path}`];
+  if (API_BASE.includes("localhost")) {
+    candidateUrls.push(`${API_BASE.replace("localhost", "127.0.0.1")}${path}`);
+  }
+  if (API_BASE && typeof window !== "undefined") {
+    candidateUrls.push(path); // Next.js rewrite fallback
+  }
+
+  for (const targetUrl of candidateUrls) {
+    try {
+      res = await fetch(targetUrl, {
+        ...init,
+        headers: requestHeaders,
+        cache: "no-store",
+      });
+      if (res) break;
+    } catch (err) {
+      lastErr = err;
+    }
+  }
+
+  if (!res) {
     const where =
       API_BASE || (typeof window !== "undefined" ? window.location.origin : "same-origin");
     throw new Error(
       `Không kết nối được API tại ${where} — kiểm tra server đã chạy chưa ` +
-        `(./run_web.sh). Chi tiết: ${(err as Error).message}`,
+        `(./run_web.sh). Chi tiết: ${(lastErr as Error)?.message || "Failed to fetch"}`,
     );
+  }
+  if (res.status === 401 && path !== "/api/auth/login") {
+    // The session is gone (expired, logged out elsewhere, password changed,
+    // account locked). Drop it so every auth-aware component falls back to
+    // its signed-out state instead of retrying with a dead token.
+    clearAuthSession();
+    redirectToLogin();
   }
   if (!res.ok) {
     // FastAPI puts the human-readable reason in `detail`; surfacing it beats a
@@ -472,6 +722,24 @@ export const api = {
     return res;
   },
   me: () => request<UserPublic>("/api/auth/me"),
+  /** Returns a fresh session: the password change signs out every other one. */
+  changePassword: async (data: { current_password: string; new_password: string }) => {
+    const res = await request<TokenResponse>("/api/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+    setAuthSession(res.access_token, res.user);
+    return res;
+  },
+
+  // Accounts (admin only)
+  listUsers: () => request<UserPublic[]>("/api/users"),
+  createUser: (data: UserCreate) =>
+    request<UserPublic>("/api/users", { method: "POST", body: JSON.stringify(data) }),
+  updateUser: (id: number, data: UserUpdate) =>
+    request<UserPublic>(`/api/users/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  deleteUser: (id: number) =>
+    request<{ ok: boolean }>(`/api/users/${id}`, { method: "DELETE" }),
   logout: async () => {
     try {
       return await request<{ ok: boolean }>("/api/auth/logout", { method: "POST" });
@@ -493,6 +761,12 @@ export const api = {
       location?: string;
       playlist_id?: number | null;
       playlist_name?: string | null;
+      /**
+       * True when the playlist on air is the one assigned to this screen. One
+       * playlist airs system-wide; a screen whose playlist is not it must idle,
+       * or it would show another account's adverts.
+       */
+      on_air?: boolean;
       user_id?: number | null;
       account_name?: string | null;
       account_username?: string | null;
@@ -643,6 +917,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ creative_id: creativeId, duration }),
     }),
+  /** Save the editor's whole ordered list in one transaction. */
+  replacePlaylistItems: (playlistId: number, items: { creative_id: number; duration?: number }[]) =>
+    request<PlaylistPublic>(`/api/playlists/${playlistId}/items`, {
+      method: "PUT",
+      body: JSON.stringify({ items }),
+    }),
   removePlaylistItem: (playlistId: number, itemId: number) =>
     request<PlaylistPublic>(`/api/playlists/${playlistId}/items/${itemId}`, { method: "DELETE" }),
   reorderPlaylistItems: (playlistId: number, itemIds: number[]) =>
@@ -738,6 +1018,35 @@ export const api = {
     ),
   timeline: (limit = 40) => request<AiringRow[]>(`/api/analytics/timeline?limit=${limit}`),
   thresholds: () => request<Thresholds>("/api/analytics/settings"),
+  breakdown: (windowHours?: number, deviceId?: string) => {
+    const q = new URLSearchParams({ tz_offset: String(new Date().getTimezoneOffset()) });
+    if (windowHours) q.set("window_hours", String(windowHours));
+    if (deviceId !== undefined) q.set("device_id", deviceId);
+    return request<Breakdown>(`/api/analytics/breakdown?${q}`);
+  },
+  detection: (days: number, deviceId?: string) =>
+    request<Detection>(
+      `/api/analytics/detection?days=${days}&tz_offset=${new Date().getTimezoneOffset()}${
+        deviceId !== undefined ? `&device_id=${encodeURIComponent(deviceId)}` : ""
+      }`,
+    ),
+  funnel: (windowHours?: number) =>
+    request<Funnel>(`/api/analytics/funnel${windowHours ? `?window_hours=${windowHours}` : ""}`),
+  hourly: (windowHours?: number) =>
+    request<HourlyAudience>(
+      `/api/analytics/hourly?tz_offset=${new Date().getTimezoneOffset()}${windowHours ? `&window_hours=${windowHours}` : ""}`,
+    ),
+  overview: (days: number, deviceId?: string | number) =>
+    request<Overview>(
+      `/api/analytics/overview?days=${days}&tz_offset=${new Date().getTimezoneOffset()}${
+        deviceId !== undefined ? `&device_id=${encodeURIComponent(String(deviceId))}` : ""
+      }`,
+    ),
+  /** Everyone a device saw on one calendar day, across sessions, oldest first. */
+  getDayLog: (deviceId: string | number, date: string, endDate?: string) =>
+    request<DayLog>(
+      `/api/sessions/day?device_id=${encodeURIComponent(String(deviceId))}&date=${date}${endDate && endDate !== date ? `&end_date=${endDate}` : ""}&tz_offset=${new Date(`${date}T00:00:00`).getTimezoneOffset()}`,
+    ),
   listSessions: (deviceId?: string | number) =>
     request<TrackingSessionPublic[]>(
       `/api/sessions${deviceId !== undefined && deviceId !== null ? `?device_id=${encodeURIComponent(String(deviceId))}` : ""}`

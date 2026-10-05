@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useRefresh } from "@/lib/useRefresh";
+import { useState } from "react";
 import { ScreenPublic, api } from "@/lib/api";
 import { IconCheck, IconClose, IconTV } from "@/components/icons/Icons";
 
@@ -29,13 +30,7 @@ export function ScreenManagerModal({ isOpen, onClose }: ScreenManagerModalProps)
     }
   };
 
-  useEffect(() => {
-    if (isOpen) {
-      loadScreens();
-      const id = setInterval(loadScreens, 4000);
-      return () => clearInterval(id);
-    }
-  }, [isOpen]);
+  useRefresh(loadScreens, 4000, isOpen);
 
   const handlePair = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -112,10 +107,10 @@ export function ScreenManagerModal({ isOpen, onClose }: ScreenManagerModalProps)
           {/* Pair new screen form */}
           <div className="rounded-xl border border-[var(--border)] bg-slate-50 p-4">
             <h3 className="text-xs font-semibold text-slate-900">
-              Ghép nối Màn hình TV mới
+              Ghép nối Màn hình Homescreen mới
             </h3>
             <p className="mt-0.5 text-[11px] text-[var(--muted)]">
-              Mở trang <code className="rounded bg-slate-200 px-1 py-0.5 font-mono text-[10px] text-slate-800">/screen</code> trên màn hình TV để nhận mã 6 ký tự, sau đó nhập vào đây:
+              Mở trang <code className="rounded bg-slate-200 px-1 py-0.5 font-mono text-[10px] text-slate-800">/homescreen</code> trên thiết bị để nhận mã 6 ký tự, sau đó nhập vào đây:
             </p>
 
             {error && (
@@ -140,7 +135,7 @@ export function ScreenManagerModal({ isOpen, onClose }: ScreenManagerModalProps)
                   type="text"
                   value={pairingCode}
                   onChange={(e) => setPairingCode(e.target.value.toUpperCase())}
-                  placeholder="VD: 4TT-9YG"
+                  placeholder="VD: 4TT9YG"
                   maxLength={10}
                   required
                   className="w-full rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 font-mono text-xs uppercase tracking-wider text-slate-900 outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
@@ -194,7 +189,7 @@ export function ScreenManagerModal({ isOpen, onClose }: ScreenManagerModalProps)
 
             {screens.length === 0 ? (
               <div className="rounded-xl border border-slate-200 bg-slate-50/60 p-6 text-center text-xs text-slate-500">
-                Chưa có màn hình nào được kết nối. Hãy mở <code className="font-mono text-emerald-700">/screen</code> trên thiết bị TV để bắt đầu!
+                Chưa có màn hình nào được kết nối. Hãy mở <code className="font-mono text-emerald-700">/homescreen</code> trên thiết bị để bắt đầu!
               </div>
             ) : (
               <div className="space-y-2">

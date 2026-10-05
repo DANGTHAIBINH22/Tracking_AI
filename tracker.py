@@ -46,6 +46,9 @@ class FaceTracker:
             tracker=self.tracker_cfg,
             conf=CFG.conf_threshold,
             iou=CFG.iou_threshold,
+            # Without this ultralytics letterboxes every frame back down to its
+            # default 640, throwing away the resolution process_long_side bought.
+            imgsz=CFG.process_long_side,
             device=self.device,
             verbose=False,
         )
@@ -66,11 +69,19 @@ class FaceTracker:
     def reset(self):
         """Reset the internal tracking state (useful when starting a new video).
 
-        The attribute has to be REMOVED, not emptied. ultralytics' on_predict_start
-        short-circuits when `persist=True` and the predictor already has a
-        `trackers` attribute, so an empty list means it never rebuilds one and the
-        next .track() call dies on `predictor.trackers[0]` with IndexError.
+        Reset each tracker IN PLACE (BYTETracker.reset: tracks, Kalman filter,
+        frame counter, id counter). Do not delete `predictor.trackers` or empty
+        the list:
+          - emptied, on_predict_start sees the attribute, skips rebuilding, and
+            the next .track() dies on `predictor.trackers[0]` with IndexError;
+          - deleted, model.track() re-registers its tracking callbacks on top of
+            the old ones, so every later frame runs through ByteTrack twice.
+            The second pass drops the one-frame-old unconfirmed track of anyone
+            who just walked in, so after the first reset() nobody new was ever
+            tracked — only whoever was already there. Measured: tracker
+            frame_id counted 70 for 35 frames, and a second face at conf 0.85
+            never got an id.
         """
         predictor = getattr(self._model, "predictor", None) if self._model is not None else None
-        if predictor is not None and hasattr(predictor, "trackers"):
-            del predictor.trackers
+        for tracker in getattr(predictor, "trackers", None) or []:
+            tracker.reset()

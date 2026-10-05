@@ -219,8 +219,31 @@ def init_db() -> None:
             ALTER TABLE playlists ADD COLUMN IF NOT EXISTS publish_status TEXT NOT NULL DEFAULT 'unpublish';
 
             ALTER TABLE screens ADD COLUMN IF NOT EXISTS playlist_id INTEGER REFERENCES playlists(id) ON DELETE SET NULL;
+            -- Which playlist put an advert on air, so reports can be cut by
+            -- playlist. NULL for a creative aired outside one (a targeted
+            -- cut-in) and for rows written before this column existed.
+            ALTER TABLE airings ADD COLUMN IF NOT EXISTS playlist_id INTEGER REFERENCES playlists(id) ON DELETE SET NULL;
             ALTER TABLE screens ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login DOUBLE PRECISION;
+            ALTER TABLE users ADD COLUMN IF NOT EXISTS password_changed_at DOUBLE PRECISION;
+            -- Accounts auto-created by the removed Clerk sign-in have no password
+            -- anyone knows; keep the rows (screens reference them) but lock them.
+            UPDATE users SET is_active = FALSE WHERE password_hash = 'CLERK_OAUTH';
             CREATE INDEX IF NOT EXISTS idx_screens_user_id ON screens(user_id);
+
+            -- Ownership. Every account sees and manages only its own media,
+            -- playlists, screens and tracking sessions; admins see everything
+            -- (see server/auth.py `scope`). SET NULL rather than CASCADE: deleting
+            -- an account must never delete adverts or history — users.delete_user
+            -- hands them to the admin doing the deleting.
+            ALTER TABLE creatives ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+            ALTER TABLE playlists ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+            ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+            CREATE INDEX IF NOT EXISTS idx_creatives_user_id ON creatives(user_id);
+            CREATE INDEX IF NOT EXISTS idx_playlists_user_id ON playlists(user_id);
+            CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON tracking_sessions(user_id);
             ALTER TABLE tracking_sessions ADD COLUMN IF NOT EXISTS tracks_json TEXT DEFAULT '[]';
 
             -- Rows written before server/audience.py existed carry the CV
@@ -243,7 +266,8 @@ def init_db() -> None:
                    VALUES (%s, %s, %s, %s, %s)""",
                 ("admin", admin_hash, "Quản Trị Viên Hệ Thống", "admin", time.time()),
             )
-            print("[Database] Đã tạo tài khoản Admin mặc định: 'admin' (mật khẩu: 'admin123')")
+            print("[Database] Đã tạo tài khoản Admin mặc định: 'admin' (mật khẩu: 'admin123') "
+                  "— hãy đổi mật khẩu ngay trong /admin > Tài khoản.")
 
         # Ensure default playlist exists only on first-ever database setup
         seeded = conn.execute("SELECT value FROM app_state WHERE key = 'seeded_default_playlist'").fetchone()
@@ -270,6 +294,19 @@ def init_db() -> None:
                 "INSERT INTO app_state (key, value) VALUES ('seeded_default_playlist', '1') "
                 "ON CONFLICT (key) DO NOTHING"
             )
+
+        # Rows from before ownership existed (or orphaned some other way) belong
+        # to the primary admin — "admin" if it is still there and active, else
+        # the oldest active admin — so no row is left that only SQL can reach.
+        # Rows that already have an owner are never touched. Runs after the
+        # seeding above so the default playlist gets an owner on first boot too.
+        for table in ("creatives", "playlists", "screens", "tracking_sessions"):
+            conn.execute(f"""
+                UPDATE {table} SET user_id = (
+                    SELECT id FROM users WHERE role = 'admin' AND is_active
+                    ORDER BY (username = 'admin') DESC, id LIMIT 1
+                ) WHERE user_id IS NULL
+            """)
 
 
 def close_db() -> None:

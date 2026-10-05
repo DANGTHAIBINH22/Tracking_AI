@@ -30,7 +30,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from server import db
-from server.routes import ads, analytics, auth, capture, ingest, live_ws, player, playlists, screens, sessions
+from server.routes import ads, analytics, auth, capture, ingest, live_ws, player, playlists, screens, sessions, users
 from server.settings import MEDIA_DIR, SETTINGS
 from server.state import ENGINE, PLAYER
 
@@ -40,6 +40,11 @@ async def lifespan(app: FastAPI):
     MEDIA_DIR.mkdir(parents=True, exist_ok=True)
     db.init_db()
     PLAYER.load_state()
+    # A playlist marked on air must be on air after a restart too. Without this
+    # every reload, crash or reboot left the screens dark until someone
+    # published the playlist again, while the admin still read "Đang phát".
+    if PLAYER.playlist():
+        PLAYER.start()
     ENGINE.set_event_loop(asyncio.get_running_loop())
 
     # Khởi tạo trước (Warmup) mô hình Moondream VLM trong luồng nền
@@ -49,6 +54,9 @@ async def lifespan(app: FastAPI):
     from scene_vlm import SceneVLM
     if getattr(CFG, "vlm_enabled", True):
         threading.Thread(target=SceneVLM.warmup, daemon=True, name="vlm-warmup").start()
+    # Same idea for the real-time models: load them and run each once now, so
+    # the first seconds of a capture are not spent on it.
+    threading.Thread(target=ENGINE.preload, daemon=True, name="pipeline-warmup").start()
 
     yield
     # Both own OS resources (a camera handle, a thread) that a reload would leak.
@@ -73,6 +81,7 @@ app.add_middleware(
 )
 
 app.include_router(auth.router)
+app.include_router(users.router)
 app.include_router(screens.router)
 app.include_router(ads.router)
 app.include_router(playlists.router)

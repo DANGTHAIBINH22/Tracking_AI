@@ -1,13 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
-import { useEffect, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
 import { MAIN_NAV_ITEMS, SCREEN_OPTIONS } from "./nav-config";
 import { TrackingControlButton } from "@/components/TrackingControlButton";
-import { UserPublic, api, clearAuthSession, getStoredUser } from "@/lib/api";
-import { IS_CLERK_ENABLED } from "@/components/ClerkWrapper";
-import { ClerkAuthNav } from "@/components/ClerkAuthNav";
+import { api, clearAuthSession } from "@/lib/api";
+import { useStoredUser } from "@/lib/useBrowserState";
 
 interface NavMobileMenuProps {
   isOpen: boolean;
@@ -21,18 +19,8 @@ export function NavMobileMenu({
   onOpenScreenModal,
 }: NavMobileMenuProps) {
   const pathname = usePathname();
-  const [currentUser, setCurrentUser] = useState<UserPublic | null>(null);
-
-  useEffect(() => {
-    setCurrentUser(getStoredUser());
-    const handleAuth = () => setCurrentUser(getStoredUser());
-    window.addEventListener("auth-change", handleAuth);
-    window.addEventListener("storage", handleAuth);
-    return () => {
-      window.removeEventListener("auth-change", handleAuth);
-      window.removeEventListener("storage", handleAuth);
-    };
-  }, []);
+  const router = useRouter();
+  const currentUser = useStoredUser();
 
   const handleLogout = async () => {
     try {
@@ -41,9 +29,8 @@ export function NavMobileMenu({
       // ignore
     } finally {
       clearAuthSession();
-      setCurrentUser(null);
       onClose();
-      window.location.href = "/login";
+      router.replace("/login");
     }
   };
 
@@ -153,8 +140,6 @@ export function NavMobileMenu({
               Đăng xuất
             </button>
           </div>
-        ) : IS_CLERK_ENABLED ? (
-          <ClerkAuthNav />
         ) : (
           <Link
             href="/login"

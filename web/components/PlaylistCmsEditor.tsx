@@ -1,220 +1,233 @@
 "use client";
 
-import {
-  Creative,
-  PlaylistPublic,
-  api,
-  mediaUrl,
-} from "@/lib/api";
+import { useRefresh } from "@/lib/useRefresh";
+import { Creative, PlaylistPublic, api, mediaUrl } from "@/lib/api";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, CircleAlert, Globe, ImageIcon, ListVideo, Play, Plus, Radio, Upload, X } from "lucide-react";
+import { IconClose, IconSearch, IconTrash } from "@/components/icons/Icons";
 import SelectScreenModal from "@/components/SelectScreenModal";
+import { FieldSelect } from "@/components/FieldSelect";
+import { AnimatedBadge } from "@/components/motion/animated-badge";
+import { Input } from "@/components/motion/input";
+import { Switch } from "@/components/motion/switch";
+import { Tabs, TabsList, TabsTrigger } from "@/components/motion/tabs";
+import {
+  SortableList,
+  SortableListGroup,
+  SortableListHandle,
+  SortableListItem,
+  SortableListItemContent,
+  SortableListUndo,
+} from "@/components/motion/sortable-list";
+import { EASE_OUT } from "@/lib/ease";
+import { cn } from "@/lib/utils";
 
-export type SlideItem = {
-  id: string; // local unique id for slide
-  dbItemId?: number; // if existing in playlist_items
-  creative: Creative | null;
-  duration: number;
-};
+/** One entry of the playlist as edited. `id` is local and stable so a row keeps
+ *  its identity while being dragged, even when the same media appears twice. */
+type Entry = { id: string; creative: Creative; duration: number };
 
 interface PlaylistCmsEditorProps {
   mode: "create" | "edit";
   playlistId?: number;
 }
 
-export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) {
-  const router = useRouter();
+const ASPECTS = [
+  { value: "FullHD Nghiêng", label: "Dọc 9:16 (1080×1920)" },
+  { value: "FullHD Ngang", label: "Ngang 16:9 (1920×1080)" },
+  { value: "4K (3840x2160)", label: "4K ngang (3840×2160)" },
+  { value: "Vuông (1:1)", label: "Vuông 1:1" },
+];
 
-  // Basic info & configurations
-  const [playlistName, setPlaylistName] = useState(
-    mode === "create" ? `Playlist Sảnh Rực Rỡ ${Math.floor(100 + Math.random() * 900)}` : ""
+// Exactly what POST /api/ads accepts; PDF used to be offered here and was then
+// refused by the server.
+const ACCEPT = ".mp4,.mov,.webm,.m4v,.avi,.mkv,.jpg,.jpeg,.png,.webp,.gif,.bmp";
+
+function formatDuration(sec: number) {
+  const s = Math.round(sec);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return s % 60 ? `${m}p ${s % 60}s` : `${m}p`;
+}
+
+function MediaThumb({ creative, className }: { creative: Creative; className?: string }) {
+  if (creative.kind === "video")
+    return <video src={`${mediaUrl(creative.url)}#t=0.5`} muted preload="metadata" className={cn("object-cover", className)} />;
+  if (creative.kind === "image")
+    // eslint-disable-next-line @next/next/no-img-element
+    return <img src={mediaUrl(creative.url)} alt="" className={cn("object-cover", className)} />;
+  return (
+    <span className={cn("flex items-center justify-center bg-slate-800 text-slate-300", className)}>
+      <Globe className="h-4 w-4" />
+    </span>
   );
-  const [playlistKind, setPlaylistKind] = useState<"slideshow" | "videowall">("slideshow");
-  const [aspectRatio, setAspectRatio] = useState<string>("FullHD Nghiêng");
+}
+
+function KindIcon({ kind, className }: { kind: string; className?: string }) {
+  if (kind === "video") return <Play className={className} />;
+  if (kind === "web") return <Globe className={className} />;
+  return <ImageIcon className={className} />;
+}
+
+export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) {
+  const reduce = useReducedMotion();
+  const nextKey = useRef(1);
+  const key = () => `e${nextKey.current++}`;
+
+  // ---- playlist fields
+  const [name, setName] = useState(() => (mode === "create" ? "Playlist mới" : ""));
+  // Video Wall was dropped: nothing ever played it differently. Every save
+  // writes "slideshow", which also normalises playlists saved as videowall.
+  const kind = "slideshow";
+  const [aspect, setAspect] = useState("FullHD Nghiêng");
+  const [fit, setFit] = useState(false);
+  // Not editable here — nothing plays it yet — but kept so a save never resets it.
   const [syncPlayback, setSyncPlayback] = useState(false);
-  const [fitScreen, setFitScreen] = useState(false);
+  const [entries, setEntries] = useState<Entry[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  // Slides list
-  const [slides, setSlides] = useState<SlideItem[]>([
-    { id: "slide-1", creative: null, duration: 5 },
-  ]);
-  const [selectedSlideIndex, setSelectedSlideIndex] = useState(0);
+  // ---- library
+  const [library, setLibrary] = useState<Creative[]>([]);
+  const [search, setSearch] = useState("");
+  const [libKind, setLibKind] = useState<"all" | "video" | "image" | "web">("all");
 
-  // Media Library
-  const [mediaList, setMediaList] = useState<Creative[]>([]);
-  const [mediaSearch, setMediaSearch] = useState("");
-  const [mediaFilter, setMediaFilter] = useState<"all" | "video" | "image" | "web">("all");
-
-  // Web URL Modal
-  const [showWebUrlModal, setShowWebUrlModal] = useState(false);
-  const [webTitle, setWebTitle] = useState("");
-  const [webUrl, setWebUrl] = useState("");
-  const [webDuration, setWebDuration] = useState(15);
-
-  // States
+  // ---- page state
   const [loading, setLoading] = useState(mode === "edit");
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
-  const [fullPlaylist, setFullPlaylist] = useState<PlaylistPublic | null>(null);
-  const [showScreenModal, setShowScreenModal] = useState(false);
+  const [saved, setSaved] = useState<PlaylistPublic | null>(null);
+  const [savedSig, setSavedSig] = useState<string>("");
+  const [publishing, setPublishing] = useState<PlaylistPublic | null>(null);
+  const [showWeb, setShowWeb] = useState(false);
+  const [web, setWeb] = useState({ title: "", url: "", duration: 15 });
+  const fileRef = useRef<HTMLInputElement>(null);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const signature = (n: string, k: string, a: string, f: boolean, list: Entry[]) =>
+    JSON.stringify([n.trim(), k, a, f, list.map((e) => [e.creative.id, e.duration])]);
+  const dirty = signature(name, kind, aspect, fit, entries) !== savedSig;
 
-  // Load existing playlist for edit mode
+  const flash = (msg: string) => {
+    setInfo(msg);
+    setTimeout(() => setInfo((cur) => (cur === msg ? null : cur)), 3000);
+  };
+
+  const applyLoaded = useCallback((data: PlaylistPublic) => {
+    const list = data.items.map((it) => ({
+      id: `e${nextKey.current++}`,
+      creative: it.creative,
+      duration: it.duration || it.creative.duration || 5,
+    }));
+    const k = "slideshow";
+    setSaved(data);
+    setName(data.name);
+    setAspect(data.aspect_ratio || "FullHD Nghiêng");
+    setFit(Boolean(data.fit_screen));
+    setSyncPlayback(Boolean(data.sync_playback));
+    setEntries(list);
+    setSelectedId(list[0]?.id ?? null);
+    setSavedSig(
+      JSON.stringify([data.name.trim(), k, data.aspect_ratio || "FullHD Nghiêng", Boolean(data.fit_screen), list.map((e) => [e.creative.id, e.duration])]),
+    );
+  }, []);
+
   useEffect(() => {
-    if (mode === "edit" && playlistId) {
-      setLoading(true);
-      api
-        .getPlaylist(playlistId)
-        .then((data) => {
-          setFullPlaylist(data);
-          setPlaylistName(data.name);
-          setPlaylistKind((data.kind as "slideshow" | "videowall") || "slideshow");
-          setAspectRatio(data.aspect_ratio || "FullHD Nghiêng");
-          setSyncPlayback(Boolean(data.sync_playback));
-          setFitScreen(Boolean(data.fit_screen));
+    if (mode !== "edit" || !playlistId) return;
+    api
+      .getPlaylist(playlistId)
+      .then(applyLoaded)
+      .catch((err) => setError((err as Error).message))
+      .finally(() => setLoading(false));
+  }, [mode, playlistId, applyLoaded]);
 
-          if (data.items && data.items.length > 0) {
-            const loadedSlides: SlideItem[] = data.items.map((it) => ({
-              id: `item-${it.id}`,
-              dbItemId: it.id,
-              creative: it.creative,
-              duration: it.duration || 5,
-            }));
-            setSlides(loadedSlides);
-          } else {
-            setSlides([{ id: "slide-1", creative: null, duration: 5 }]);
-          }
-        })
-        .catch((err) => setError((err as Error).message))
-        .finally(() => setLoading(false));
-    }
-  }, [mode, playlistId]);
-
-  // Fetch Media Library
-  const refreshMedia = useCallback(async () => {
+  const refreshLibrary = useCallback(async () => {
     try {
-      const ads = await api.listAds();
-      setMediaList(ads);
+      setLibrary(await api.listAds());
     } catch (err) {
       console.error(err);
     }
   }, []);
+  useRefresh(refreshLibrary);
 
+  // Leaving with unsaved edits used to drop them silently.
   useEffect(() => {
-    refreshMedia();
-  }, [refreshMedia]);
+    if (!dirty) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => e.preventDefault();
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [dirty]);
 
-  // Current selected slide
-  const currentSlide = slides[selectedSlideIndex] || slides[0] || null;
+  const selected = entries.find((e) => e.id === selectedId) ?? null;
+  const totalDuration = entries.reduce((sum, e) => sum + e.duration, 0);
+  const usage = useMemo(() => {
+    const m = new Map<number, number>();
+    entries.forEach((e) => m.set(e.creative.id, (m.get(e.creative.id) ?? 0) + 1));
+    return m;
+  }, [entries]);
 
-  // Assign media to currently selected slide
-  const handleAssignMedia = (creative: Creative) => {
-    setSlides((prev) => {
-      const next = [...prev];
-      if (next[selectedSlideIndex]) {
-        next[selectedSlideIndex] = {
-          ...next[selectedSlideIndex],
-          creative,
-          duration: creative.duration > 0 ? creative.duration : next[selectedSlideIndex].duration,
-        };
-      }
-      return next;
-    });
-    setInfo(`Đã gán "${creative.name}" vào Trang ${selectedSlideIndex + 1}!`);
-    setTimeout(() => setInfo(null), 3000);
+  const filteredLibrary = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return library.filter(
+      (c) => (libKind === "all" || c.kind === libKind) && (!q || c.name.toLowerCase().includes(q)),
+    );
+  }, [library, search, libKind]);
+
+  /** Append a media to the end of the playlist and select it. */
+  const addEntry = (creative: Creative) => {
+    const entry: Entry = { id: key(), creative, duration: creative.duration > 0 ? Math.round(creative.duration * 10) / 10 : 10 };
+    setEntries((prev) => [...prev, entry]);
+    setSelectedId(entry.id);
   };
 
-  // Add a new slide
-  const handleAddSlide = () => {
-    const newSlide: SlideItem = {
-      id: `slide-${Date.now()}`,
-      creative: null,
-      duration: 5,
-    };
-    setSlides((prev) => [...prev, newSlide]);
-    setSelectedSlideIndex(slides.length);
-  };
-
-  // Move slide
-  const handleMoveSlide = (index: number, delta: number) => {
-    const target = index + delta;
-    if (target < 0 || target >= slides.length) return;
-    setSlides((prev) => {
-      const next = [...prev];
-      [next[index], next[target]] = [next[target], next[index]];
-      return next;
-    });
-    setSelectedSlideIndex(target);
-  };
-
-  // Delete slide
-  const handleDeleteSlide = (index: number) => {
-    if (slides.length <= 1) {
-      setSlides([{ id: `slide-${Date.now()}`, creative: null, duration: 5 }]);
-      setSelectedSlideIndex(0);
-      return;
-    }
-    setSlides((prev) => prev.filter((_, i) => i !== index));
-    setSelectedSlideIndex((prev) => Math.max(0, prev - 1));
-  };
-
-  // Update slide duration
-  const handleSlideDurationChange = (index: number, dur: number) => {
-    if (dur <= 0) return;
-    setSlides((prev) => {
-      const next = [...prev];
-      if (next[index]) {
-        next[index] = { ...next[index], duration: dur };
+  const removeEntry = (id: string) => {
+    setEntries((prev) => {
+      const next = prev.filter((e) => e.id !== id);
+      if (id === selectedId) {
+        const at = prev.findIndex((e) => e.id === id);
+        setSelectedId(next[Math.min(at, next.length - 1)]?.id ?? null);
       }
       return next;
     });
   };
 
-  // File Upload handler
-  const handleUploadFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
+  const setDuration = (id: string, value: number) =>
+    setEntries((prev) => prev.map((e) => (e.id === id ? { ...e, duration: value } : e)));
+
+  const handleUpload = async (files: FileList | null) => {
+    if (!files?.length) return;
     setUploading(true);
     setError(null);
     try {
-      const file = files[0];
-      const creative = await api.uploadAd(file);
-      await refreshMedia();
-      // Auto assign to selected slide
-      handleAssignMedia(creative);
-      setInfo(`Đã tải lên và gán "${creative.name}" vào trang hiện tại!`);
-      setTimeout(() => setInfo(null), 4000);
+      for (const file of Array.from(files)) {
+        addEntry(await api.uploadAd(file));
+      }
+      await refreshLibrary();
+      flash(`Đã tải lên và thêm ${files.length} tệp.`);
     } catch (err) {
       setError((err as Error).message);
     } finally {
       setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
+      if (fileRef.current) fileRef.current.value = "";
     }
   };
 
-  // Web URL Add handler
-  const handleAddWebUrl = async (e: React.FormEvent) => {
+  const handleAddWeb = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!webUrl.trim() || !webTitle.trim()) return;
+    if (!web.title.trim() || !web.url.trim()) return;
     setSaving(true);
     try {
       const creative = await api.addUrlCreative({
-        name: webTitle.trim(),
-        url: webUrl.trim(),
-        duration: webDuration,
+        name: web.title.trim(),
+        url: web.url.trim(),
+        duration: web.duration,
         category: "Web/Dashboard",
       });
-      await refreshMedia();
-      handleAssignMedia(creative);
-      setShowWebUrlModal(false);
-      setWebTitle("");
-      setWebUrl("");
-      setInfo(`Đã thêm nội dung Web "${creative.name}"!`);
-      setTimeout(() => setInfo(null), 4000);
+      addEntry(creative);
+      await refreshLibrary();
+      setShowWeb(false);
+      setWeb({ title: "", url: "", duration: 15 });
     } catch (err) {
       setError((err as Error).message);
     } finally {
@@ -222,665 +235,428 @@ export function PlaylistCmsEditor({ mode, playlistId }: PlaylistCmsEditorProps) 
     }
   };
 
-  // Save Playlist
-  const handleSavePlaylist = async () => {
-    if (!playlistName.trim()) {
-      setError("Vui lòng nhập tên Playlist");
-      return;
+  /** Save fields and items; the item list goes up in one transaction. */
+  const save = async (): Promise<PlaylistPublic | null> => {
+    if (!name.trim()) {
+      setError("Nhập tên playlist.");
+      return null;
+    }
+    if (entries.some((e) => !(e.duration > 0))) {
+      setError("Mỗi mục cần thời lượng lớn hơn 0 giây.");
+      return null;
     }
     setSaving(true);
     setError(null);
     try {
-      let savedPlaylistId = playlistId;
-
-      if (mode === "create" || !savedPlaylistId) {
-        const created = await api.createPlaylist({
-          name: playlistName.trim(),
-          kind: playlistKind,
-          aspect_ratio: aspectRatio,
-          sync_playback: syncPlayback,
-          fit_screen: fitScreen,
-          is_active: false,
-        });
-        savedPlaylistId = created.id;
-      } else {
-        await api.updatePlaylist(savedPlaylistId, {
-          name: playlistName.trim(),
-          kind: playlistKind,
-          aspect_ratio: aspectRatio,
-          sync_playback: syncPlayback,
-          fit_screen: fitScreen,
-        });
-      }
-
-      // Sync items:
-      // Remove all existing items if edit mode
-      if (mode === "edit" && playlistId) {
-        const existing = await api.getPlaylist(playlistId);
-        for (const it of existing.items) {
-          await api.removePlaylistItem(playlistId, it.id);
-        }
-      }
-
-      // Add each valid slide to playlist
-      for (const slide of slides) {
-        if (slide.creative) {
-          await api.addPlaylistItem(savedPlaylistId, slide.creative.id, slide.duration);
-        }
-      }
-
-      setInfo("Đã lưu playlist thành công!");
-      setTimeout(() => {
-        router.push("/playlists");
-      }, 800);
+      const fields = { name: name.trim(), kind, aspect_ratio: aspect, fit_screen: fit, sync_playback: syncPlayback };
+      const id = saved?.id ?? playlistId ?? (await api.createPlaylist({ ...fields, is_active: false })).id;
+      if (saved?.id || playlistId) await api.updatePlaylist(id, fields);
+      const result = await api.replacePlaylistItems(
+        id,
+        entries.map((e) => ({ creative_id: e.creative.id, duration: e.duration })),
+      );
+      applyLoaded(result);
+      flash("Đã lưu playlist.");
+      // A new playlist now has an address. Rewrite the URL in place rather than
+      // navigating: a navigation remounts the editor and would drop the
+      // publish dialog that "Lưu & phát" is about to open.
+      if (mode === "create") window.history.replaceState(null, "", `/playlists/${id}`);
+      return result;
     } catch (err) {
       setError((err as Error).message);
+      return null;
+    } finally {
       setSaving(false);
     }
   };
 
-  // Filtered media list
-  const filteredMedia = useMemo(() => {
-    return mediaList.filter((item) => {
-      const matchSearch = item.name.toLowerCase().includes(mediaSearch.toLowerCase());
-      const matchType =
-        mediaFilter === "all"
-          ? true
-          : mediaFilter === "video"
-          ? item.kind === "video"
-          : mediaFilter === "image"
-          ? item.kind === "image"
-          : item.kind === "web";
-      return matchSearch && matchType;
-    });
-  }, [mediaList, mediaSearch, mediaFilter]);
+  const saveAndPublish = async () => {
+    const result = dirty || !saved ? await save() : saved;
+    if (!result) return;
+    if (!result.item_count) {
+      setError("Thêm ít nhất một media trước khi phát.");
+      return;
+    }
+    setPublishing(result);
+  };
 
   if (loading) {
     return (
-      <div className="flex h-screen items-center justify-center bg-[#111215] text-white">
-        <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-emerald-500 border-t-transparent" />
-          <p className="text-xs text-zinc-400">Đang tải cấu hình Playlist CMS...</p>
+      <div className="flex h-dvh items-center justify-center bg-background">
+        <div className="flex flex-col items-center gap-3 text-xs text-slate-500">
+          <div className="h-7 w-7 animate-spin rounded-full border-2 border-emerald-600 border-t-transparent" />
+          Đang tải playlist…
         </div>
       </div>
     );
   }
 
-  // Calculate canvas aspect ratio
-  const isPortrait = aspectRatio.includes("Nghiêng") || aspectRatio.includes("1080x1920");
+  const isPortrait = aspect === "FullHD Nghiêng";
+  const isSquare = aspect.startsWith("Vuông");
 
   return (
-    <div className="flex h-screen flex-col bg-[#f8fafc] text-slate-800 overflow-hidden select-none">
-      {/* ==================== 1. TOP BAR ==================== */}
-      <header className="flex h-13 shrink-0 items-center justify-between border-b border-slate-200 bg-white px-4 shadow-2xs">
-        {/* Left: Breadcrumbs */}
-        <div className="flex items-center gap-3 text-xs">
+    <div className="flex h-dvh flex-col overflow-hidden bg-background text-slate-800">
+      {/* ==================== TOP BAR ==================== */}
+      <header className="flex shrink-0 flex-wrap items-center justify-between gap-3 border-b border-slate-200 bg-white px-4 py-2.5">
+        <div className="flex min-w-0 flex-1 items-center gap-2.5">
           <Link
             href="/playlists"
-            className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 transition"
-            title="Quay lại Playlist"
+            onClick={(e) => dirty && !confirm("Bỏ các thay đổi chưa lưu?") && e.preventDefault()}
+            aria-label="Quay lại danh sách playlist"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-500 transition hover:bg-slate-100 hover:text-slate-800"
           >
-            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-            </svg>
+            <ArrowLeft className="h-4 w-4" />
           </Link>
-          <span className="text-slate-300">|</span>
-          <div className="flex items-center gap-1.5 font-medium">
-            <Link href="/" className="text-slate-400 hover:text-slate-700 transition">
-              Trang chủ
-            </Link>
-            <span className="text-slate-300">›</span>
-            <Link href="/playlists" className="text-slate-400 hover:text-slate-700 transition">
-              Playlist
-            </Link>
-            <span className="text-slate-300">›</span>
-            <span className="text-slate-900 font-semibold">
-              {mode === "create" ? "Tạo mới" : playlistName || "Chỉnh sửa"}
-            </span>
-          </div>
-        </div>
-
-        {/* Right: Actions */}
-        <div className="flex items-center gap-2.5">
-          {mode === "edit" && fullPlaylist && (
-            <button
-              type="button"
-              onClick={() => setShowScreenModal(true)}
-              className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-50 border border-emerald-300 px-3.5 py-2 text-xs font-bold text-emerald-700 hover:bg-emerald-100/80 transition cursor-pointer shadow-2xs"
-              title="Chọn thiết bị của tài khoản để phát playlist này"
-            >
-              <span>📺 Phát lên thiết bị</span>
-            </button>
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Tên playlist"
+            aria-label="Tên playlist"
+            className="min-w-0 max-w-md flex-1 rounded-lg border border-transparent bg-transparent px-2 py-1 text-base font-bold text-slate-900 outline-none transition hover:border-slate-200 focus:border-emerald-500 focus:bg-white"
+          />
+          {saved?.is_active && (
+            <AnimatedBadge size="sm" status="success" pulse icon={<Radio className="h-3 w-3" />} className="shrink-0">
+              Đang phát
+            </AnimatedBadge>
           )}
-
-          <Link
-            href="/playlists"
-            className="px-3.5 py-1.5 text-xs font-semibold text-slate-600 hover:text-slate-900 transition hover:bg-slate-100 rounded-xl"
-          >
-            Hủy
-          </Link>
-
+          <span className={cn("hidden shrink-0 text-[11px] sm:inline", dirty ? "font-semibold text-amber-600" : "text-slate-400")}>
+            {dirty ? "● Chưa lưu" : saved ? "Đã lưu" : ""}
+          </span>
+        </div>
+        <div className="flex items-center gap-2">
           <button
             type="button"
-            disabled={saving}
-            onClick={handleSavePlaylist}
-            className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white shadow-sm transition hover:bg-emerald-700 disabled:opacity-50 active:scale-95 cursor-pointer"
+            disabled={saving || (!dirty && Boolean(saved))}
+            onClick={save}
+            className="rounded-xl border border-slate-200 bg-white px-3.5 py-2 text-xs font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-50"
           >
-            {saving ? "Đang lưu..." : "Lưu playlist"}
+            {saving ? "Đang lưu…" : "Lưu"}
+          </button>
+          <button
+            type="button"
+            disabled={saving || entries.length === 0}
+            onClick={saveAndPublish}
+            title={entries.length === 0 ? "Thêm media trước khi phát" : undefined}
+            className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-600 px-4 py-2 text-xs font-bold text-white shadow-sm transition hover:bg-emerald-700 disabled:opacity-50"
+          >
+            <Radio className="h-3.5 w-3.5" />
+            {dirty || !saved ? "Lưu & phát" : "Phát lên thiết bị"}
           </button>
         </div>
       </header>
 
-      {/* ==================== 2. CONFIGURATION CONTROLS BAR ==================== */}
-      <section className="shrink-0 border-b border-slate-200 bg-white px-4 py-2.5 shadow-2xs">
-        <div className="flex flex-wrap items-center gap-4 text-xs">
-          {/* Tên playlist */}
-          <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-semibold text-slate-500">Tên playlist</label>
-            <input
-              type="text"
-              value={playlistName}
-              onChange={(e) => setPlaylistName(e.target.value)}
-              placeholder="Nhập tên playlist..."
-              className="h-8 w-56 rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs text-slate-900 placeholder-slate-400 outline-none focus:bg-white focus:border-emerald-500 transition"
-            />
-          </div>
-
-          {/* Loại playlist: Segmented toggle */}
-          <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-semibold text-slate-500">Loại playlist</label>
-            <div className="flex h-8 items-center rounded-lg border border-slate-200 bg-slate-100 p-0.5">
-              <button
-                type="button"
-                onClick={() => setPlaylistKind("slideshow")}
-                className={`h-full rounded-md px-3 text-xs font-semibold transition cursor-pointer ${
-                  playlistKind === "slideshow"
-                    ? "bg-white text-slate-900 shadow-xs"
-                    : "text-slate-500 hover:text-slate-900"
-                }`}
-              >
-                Slideshow
-              </button>
-              <button
-                type="button"
-                onClick={() => setPlaylistKind("videowall")}
-                className={`h-full rounded-md px-3 text-xs font-semibold transition cursor-pointer ${
-                  playlistKind === "videowall"
-                    ? "bg-white text-slate-900 shadow-xs"
-                    : "text-slate-500 hover:text-slate-900"
-                }`}
-              >
-                Video Wall
-              </button>
-            </div>
-          </div>
-
-          {/* Tỷ lệ màn hình */}
-          <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-semibold text-slate-500">Tỷ lệ màn hình</label>
-            <select
-              value={aspectRatio}
-              onChange={(e) => setAspectRatio(e.target.value)}
-              className="h-8 rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs text-slate-800 outline-none focus:bg-white focus:border-emerald-500 cursor-pointer"
-            >
-              <option value="FullHD Nghiêng">FullHD Nghiêng (1080x1920)</option>
-              <option value="FullHD Ngang">FullHD Ngang (1920x1080)</option>
-              <option value="4K (3840x2160)">4K (3840x2160)</option>
-              <option value="Vuông (1:1)">Vuông (1:1)</option>
-            </select>
-          </div>
-
-          {/* Chế độ phát đồng bộ */}
-          <div className="flex items-center gap-2 pt-4">
-            <span className="text-[11px] font-semibold text-slate-500">Chế độ phát đồng bộ</span>
-            <button
-              type="button"
-              onClick={() => setSyncPlayback(!syncPlayback)}
-              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                syncPlayback ? "bg-emerald-600" : "bg-slate-300"
-              }`}
-            >
-              <span
-                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
-                  syncPlayback ? "translate-x-4" : "translate-x-0"
-                }`}
-              />
-            </button>
-          </div>
-
-          {/* Vừa khung hình */}
-          <div className="flex items-center gap-2 pt-4">
-            <span className="text-[11px] font-semibold text-slate-500">Vừa khung hình</span>
-            <button
-              type="button"
-              onClick={() => setFitScreen(!fitScreen)}
-              className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                fitScreen ? "bg-emerald-600" : "bg-slate-300"
-              }`}
-            >
-              <span
-                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-md ring-0 transition duration-200 ease-in-out ${
-                  fitScreen ? "translate-x-4" : "translate-x-0"
-                }`}
-              />
-            </button>
-          </div>
-
-          {/* Notifications */}
-          {(info || error) && (
-            <div className="ml-auto flex items-center gap-2 pt-3">
-              {info && <span className="text-xs font-semibold text-emerald-700">{info}</span>}
-              {error && <span className="text-xs font-semibold text-rose-600">{error}</span>}
-            </div>
-          )}
-        </div>
-      </section>
-
-      {/* ==================== 3. MAIN WORKSPACE (CENTER CANVAS + RIGHT MEDIA) ==================== */}
-      <div className="flex flex-1 overflow-hidden">
-
-        {/* 3.2 Center Preview Canvas */}
-        <main className="relative flex flex-1 flex-col items-center justify-center bg-slate-100/90 p-4 overflow-hidden">
-          {/* Top Simulator Mode Badge */}
-          <div className="absolute top-4 flex items-center justify-center">
-            <span className="rounded-full bg-white border border-slate-200/90 px-3.5 py-1 text-[10px] font-bold tracking-wider text-slate-600 uppercase shadow-2xs">
-              Chế độ mô phỏng trình phát ({isPortrait ? "1080x1920PX" : "1920x1080PX"})
-            </span>
-          </div>
-
-          {/* Canvas Box */}
-          <div
-            className={`relative flex items-center justify-center overflow-hidden rounded-2xl border border-slate-300 bg-slate-900 shadow-xl transition-all duration-200 ${
-              isPortrait
-                ? "h-[72%] aspect-[9/16]"
-                : "w-[72%] max-w-4xl aspect-video"
-            }`}
+      <AnimatePresence>
+        {(error || info) && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: reduce ? 0 : 0.18, ease: EASE_OUT }}
+            className="shrink-0 overflow-hidden"
           >
-            {currentSlide && currentSlide.creative ? (
-              <div className="relative h-full w-full bg-black flex items-center justify-center">
-                {currentSlide.creative.kind === "image" ? (
-                  // eslint-disable-next-line @next/next/no-img-element
-                  <img
-                    src={mediaUrl(currentSlide.creative.url)}
-                    alt={currentSlide.creative.name}
-                    className={`h-full w-full ${fitScreen ? "object-cover" : "object-contain"}`}
-                  />
-                ) : currentSlide.creative.kind === "video" ? (
-                  <video
-                    src={mediaUrl(currentSlide.creative.url)}
-                    autoPlay
-                    loop
-                    muted
-                    className={`h-full w-full ${fitScreen ? "object-cover" : "object-contain"}`}
-                  />
-                ) : (
-                  <iframe
-                    src={currentSlide.creative.url}
-                    title={currentSlide.creative.name}
-                    className="h-full w-full border-0 bg-white"
-                  />
-                )}
+            <div
+              className={cn(
+                "flex items-center justify-between gap-2 px-4 py-2 text-xs font-medium",
+                error ? "bg-rose-50 text-rose-700" : "bg-emerald-50 text-emerald-800",
+              )}
+            >
+              <span className="flex items-center gap-1.5">
+                {error && <CircleAlert className="h-3.5 w-3.5" />}
+                {error || info}
+              </span>
+              <button onClick={() => (error ? setError(null) : setInfo(null))} aria-label="Đóng">
+                <IconClose className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
-                {/* Floating slide info tag */}
-                <div className="absolute bottom-3 left-3 rounded-lg bg-black/70 px-2.5 py-1 text-[10px] font-semibold text-white backdrop-blur-xs">
-                  Trang {selectedSlideIndex + 1}: {currentSlide.creative.name} ({currentSlide.duration}s)
-                </div>
+      {/* ==================== WORKSPACE ==================== */}
+      <div className="grid min-h-0 flex-1 grid-cols-1 overflow-y-auto lg:grid-cols-[340px_minmax(0,1fr)_320px] lg:overflow-hidden">
+        {/* ----- Left: the playlist ----- */}
+        <aside className="flex min-h-0 flex-col border-b border-slate-200 bg-white lg:border-r lg:border-b-0">
+          <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
+            <div>
+              <h2 className="text-xs font-bold text-slate-900">Danh sách phát</h2>
+              <p className="text-[11px] text-slate-500">
+                {entries.length} mục · {formatDuration(totalDuration)} mỗi vòng
+              </p>
+            </div>
+          </div>
+          <div className="min-h-0 flex-1 overflow-y-auto p-3">
+            {entries.length === 0 ? (
+              <div className="flex h-full min-h-48 flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-slate-200 p-6 text-center">
+                <ListVideo className="h-6 w-6 text-slate-300" />
+                <p className="text-xs font-semibold text-slate-700">Playlist đang trống</p>
+                <p className="text-[11px] text-slate-500">Bấm vào media ở thư viện bên phải để thêm vào cuối danh sách.</p>
               </div>
             ) : (
-              /* Empty state */
-              <div className="flex flex-col items-center justify-center text-center p-8 space-y-3 bg-white/95 rounded-2xl border border-slate-200 shadow-md max-w-xs mx-4">
-                <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-slate-100 text-xs font-bold text-slate-400 border border-slate-200">
-                  Trống
-                </div>
-                <div className="space-y-1">
-                  <h3 className="text-sm font-bold text-slate-900">Trang này chưa có nội dung</h3>
-                  <p className="text-xs text-slate-500 leading-relaxed">
-                    Chọn một hình ảnh hoặc video ở Thư viện Media bên phải để gán vào trang này.
-                  </p>
-                </div>
-              </div>
+              <SortableList
+                items={entries}
+                onItemsChange={setEntries}
+                getItemLabel={(e) => e.creative.name}
+                label="Thứ tự phát"
+                className="max-w-none"
+              >
+                {(items) => (
+                  <>
+                    <SortableListGroup className="space-y-1.5">
+                      {items.map((entry, index) => {
+                        const active = entry.id === selectedId;
+                        return (
+                          <SortableListItem
+                            key={entry.id}
+                            id={entry.id}
+                            onClick={() => setSelectedId(entry.id)}
+                            className={cn(
+                              "cursor-pointer gap-2 rounded-xl p-1.5 pr-2",
+                              active ? "border-emerald-400 bg-emerald-50/60" : "hover:border-slate-300",
+                            )}
+                          >
+                            <SortableListHandle className="size-7" />
+                            <span className="w-4 shrink-0 text-center text-[10px] font-bold text-slate-400 tabular">{index + 1}</span>
+                            <MediaThumb creative={entry.creative} className="h-10 w-14 shrink-0 rounded-md bg-slate-900" />
+                            <SortableListItemContent>
+                              <p className="truncate text-xs font-semibold text-slate-800">{entry.creative.name}</p>
+                              <label
+                                className="mt-0.5 flex items-center gap-1 text-[10px] text-slate-500"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <KindIcon kind={entry.creative.kind} className="h-3 w-3" />
+                                <input
+                                  type="number"
+                                  min={1}
+                                  step={0.5}
+                                  value={entry.duration}
+                                  onChange={(e) => setDuration(entry.id, Number(e.target.value))}
+                                  aria-label={`Thời lượng ${entry.creative.name}`}
+                                  className="w-14 rounded border border-slate-200 bg-white px-1 py-0.5 text-right text-[10px] font-semibold text-slate-800 tabular outline-none focus:border-emerald-500"
+                                />
+                                giây
+                              </label>
+                            </SortableListItemContent>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                removeEntry(entry.id);
+                              }}
+                              aria-label={`Bỏ ${entry.creative.name}`}
+                              className="shrink-0 rounded-md p-1 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"
+                            >
+                              <IconTrash className="h-3.5 w-3.5" />
+                            </button>
+                          </SortableListItem>
+                        );
+                      })}
+                    </SortableListGroup>
+                    <SortableListUndo className="mt-2" />
+                  </>
+                )}
+              </SortableList>
             )}
+          </div>
+        </aside>
+
+        {/* ----- Center: preview + display settings ----- */}
+        <main className="flex min-h-0 flex-col bg-slate-100/80">
+          <div className="flex min-h-80 flex-1 items-center justify-center p-5">
+            <div
+              className={cn(
+                "relative flex items-center justify-center overflow-hidden rounded-2xl border border-slate-300 bg-slate-950 shadow-xl",
+                isPortrait ? "aspect-9/16 h-full max-h-[70vh]" : isSquare ? "aspect-square h-full max-h-[60vh]" : "aspect-video w-full max-w-3xl",
+              )}
+            >
+              {selected ? (
+                <>
+                  {selected.creative.kind === "video" ? (
+                    <video
+                      key={selected.id}
+                      src={mediaUrl(selected.creative.url)}
+                      autoPlay
+                      loop
+                      muted
+                      playsInline
+                      className={cn("h-full w-full", fit ? "object-cover" : "object-contain")}
+                    />
+                  ) : selected.creative.kind === "image" ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      key={selected.id}
+                      src={mediaUrl(selected.creative.url)}
+                      alt={selected.creative.name}
+                      className={cn("h-full w-full", fit ? "object-cover" : "object-contain")}
+                    />
+                  ) : (
+                    <iframe key={selected.id} src={selected.creative.url} title={selected.creative.name} className="h-full w-full border-0 bg-white" />
+                  )}
+                  <span className="absolute bottom-2.5 left-2.5 max-w-[85%] truncate rounded-md bg-black/65 px-2 py-0.5 text-[10px] font-medium text-white backdrop-blur-xs">
+                    {entries.findIndex((e) => e.id === selected.id) + 1}/{entries.length} · {selected.creative.name} · {selected.duration}s
+                  </span>
+                </>
+              ) : (
+                <p className="px-6 text-center text-xs text-slate-400">Chọn một mục trong danh sách để xem trước</p>
+              )}
+            </div>
+          </div>
+
+          <div className="relative z-10 flex shrink-0 flex-wrap items-end gap-4 border-t border-slate-200 bg-white px-4 py-3">
+            <FieldSelect label="Tỷ lệ khung" value={aspect} onChange={setAspect} options={ASPECTS} className="w-52" />
+            <div className="pb-1.5">
+              <Switch checked={fit} onCheckedChange={setFit} label="Lấp đầy khung (cắt viền)" />
+            </div>
+            <p className="basis-full text-[11px] text-slate-400">
+              Tỷ lệ và chế độ lấp đầy hiện chỉ áp dụng cho khung xem trước; màn hình thật luôn hiển thị trọn nội dung.
+            </p>
           </div>
         </main>
 
-        {/* 3.3 Right Media Library Drawer */}
-        <aside className="flex w-72 sm:w-80 shrink-0 flex-col border-l border-slate-200 bg-white shadow-2xs">
-          {/* Header */}
-          <div className="border-b border-slate-100 p-3.5 space-y-1 bg-slate-50/50">
-            <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">Thư Viện Media</h3>
-            <p className="text-[11px] text-slate-500">Bấm vào media để gán cho trang đang chọn.</p>
-          </div>
-
-          {/* Search & Filter */}
-          <div className="p-3 border-b border-slate-100 space-y-2">
-            <div className="relative">
-              <input
-                type="text"
-                placeholder="Tìm theo tên..."
-                value={mediaSearch}
-                onChange={(e) => setMediaSearch(e.target.value)}
-                className="h-8 w-full rounded-lg border border-slate-200 bg-slate-50 px-2.5 text-xs text-slate-900 placeholder-slate-400 outline-none focus:bg-white focus:border-emerald-500 transition"
-              />
+        {/* ----- Right: media library ----- */}
+        <aside className="flex min-h-0 flex-col border-t border-slate-200 bg-white lg:border-t-0 lg:border-l">
+          <div className="space-y-2.5 border-b border-slate-100 p-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-xs font-bold text-slate-900">Thư viện media</h2>
+              <span className="text-[11px] text-slate-400">Bấm để thêm</span>
             </div>
-
-            <div className="flex items-center justify-between text-xs text-slate-600">
-              <span className="text-[11px] font-medium">Lọc loại</span>
-              <select
-                value={mediaFilter}
-                onChange={(e) => setMediaFilter(e.target.value as "all" | "video" | "image" | "web")}
-                className="h-7 rounded-lg border border-slate-200 bg-slate-50 px-2 text-[11px] text-slate-700 outline-none focus:bg-white focus:border-emerald-500 cursor-pointer"
-              >
-                <option value="all">Tất cả</option>
-                <option value="video">Chỉ Video</option>
-                <option value="image">Chỉ Hình ảnh</option>
-                <option value="web">Chỉ Web URL</option>
-              </select>
-            </div>
-          </div>
-
-          {/* Quick Action Buttons */}
-          <div className="p-3 border-b border-slate-100 space-y-2">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*,video/*,application/pdf"
-              onChange={handleUploadFile}
-              className="hidden"
+            <Input
+              value={search}
+              onChange={setSearch}
+              placeholder="Tìm media…"
+              aria-label="Tìm media"
+              leftIcon={<IconSearch />}
+              classNames={{ field: "h-8 rounded-lg bg-slate-50/60", input: "text-xs" }}
             />
-            <button
-              type="button"
-              disabled={uploading}
-              onClick={() => fileInputRef.current?.click()}
-              className="flex w-full items-center justify-center gap-1.5 rounded-xl bg-emerald-600 py-2 text-xs font-bold text-white hover:bg-emerald-700 transition shadow-xs disabled:opacity-50 cursor-pointer"
-            >
-              <span>{uploading ? "Đang tải..." : "+ Tải ảnh/video/PDF lên"}</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setShowWebUrlModal(true)}
-              className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-slate-50 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 transition shadow-2xs cursor-pointer"
-            >
-              <span>+ Thêm nội dung Web (URL)</span>
-            </button>
+            <Tabs value={libKind} onValueChange={(v) => setLibKind(v as typeof libKind)} variant="segment">
+              <TabsList className="w-full border border-slate-200 bg-slate-100">
+                {(
+                  [
+                    ["all", "Tất cả"],
+                    ["video", "Video"],
+                    ["image", "Ảnh"],
+                    ["web", "Web"],
+                  ] as const
+                ).map(([v, l]) => (
+                  <TabsTrigger key={v} value={v}>
+                    <span className="text-[11px]">{l}</span>
+                  </TabsTrigger>
+                ))}
+              </TabsList>
+            </Tabs>
+            <div className="grid grid-cols-2 gap-2">
+              <input ref={fileRef} type="file" multiple accept={ACCEPT} onChange={(e) => handleUpload(e.target.files)} className="hidden" />
+              <button
+                type="button"
+                disabled={uploading}
+                onClick={() => fileRef.current?.click()}
+                className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-emerald-600 py-1.5 text-[11px] font-semibold text-white transition hover:bg-emerald-700 disabled:opacity-50"
+              >
+                <Upload className="h-3.5 w-3.5" />
+                {uploading ? "Đang tải…" : "Tải lên"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowWeb(true)}
+                className="inline-flex items-center justify-center gap-1.5 rounded-lg border border-slate-200 py-1.5 text-[11px] font-semibold text-slate-700 transition hover:bg-slate-50"
+              >
+                <Globe className="h-3.5 w-3.5" />
+                Trang web
+              </button>
+            </div>
           </div>
 
-          {/* Media Items Scrollable List */}
-          <div className="flex-1 overflow-y-auto p-2 divide-y divide-slate-100">
-            {filteredMedia.map((ad) => {
-              const isCurrent = currentSlide?.creative?.id === ad.id;
-
-              return (
-                <div
-                  key={ad.id}
-                  onClick={() => handleAssignMedia(ad)}
-                  className={`flex items-center gap-2.5 p-2 rounded-xl cursor-pointer transition ${
-                    isCurrent
-                      ? "bg-emerald-50 border border-emerald-300"
-                      : "hover:bg-slate-50 border border-transparent"
-                  }`}
-                  title="Bấm để gán vào trang đang chọn"
-                >
-                  {/* Icon */}
-                  <div className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg border text-[10px] font-bold ${
-                    isCurrent
-                      ? "bg-emerald-100 border-emerald-300 text-emerald-800"
-                      : "bg-slate-100 border-slate-200 text-slate-600"
-                  }`}>
-                    {ad.kind === "video" ? "VID" : ad.kind === "web" ? "WEB" : "IMG"}
-                  </div>
-
-                  {/* Title & Info */}
-                  <div className="flex-1 min-w-0">
-                    <p className={`text-xs font-medium truncate ${isCurrent ? "text-emerald-900 font-bold" : "text-slate-800"}`}>{ad.name}</p>
-                    <p className="text-[10px] text-slate-500 truncate">
-                      {ad.kind === "video"
-                        ? `Video (${ad.duration}s)`
-                        : ad.kind === "web"
-                        ? "Web URL"
-                        : `Ảnh (${ad.duration}s)`}
-                    </p>
-                  </div>
-
-                  {isCurrent && (
-                    <span className="text-[11px] font-bold text-emerald-700">Đã gán</span>
-                  )}
-                </div>
-              );
-            })}
-
-            {filteredMedia.length === 0 && (
-              <div className="py-12 text-center text-xs text-slate-400">
-                Chưa có media nào. Hãy bấm nút &quot;Tải ảnh/video/PDF lên&quot; ở trên!
+          <div className="min-h-0 flex-1 overflow-y-auto p-3">
+            {filteredLibrary.length === 0 ? (
+              <p className="py-10 text-center text-xs text-slate-400">
+                {library.length ? "Không có media khớp tìm kiếm." : "Thư viện trống — tải media lên để bắt đầu."}
+              </p>
+            ) : (
+              <div className="grid grid-cols-2 gap-2">
+                {filteredLibrary.map((c) => {
+                  const count = usage.get(c.id) ?? 0;
+                  return (
+                    <button
+                      key={c.id}
+                      type="button"
+                      onClick={() => addEntry(c)}
+                      title={`Thêm "${c.name}" vào cuối danh sách`}
+                      className={cn(
+                        "group relative overflow-hidden rounded-xl border text-left transition",
+                        count ? "border-emerald-300" : "border-slate-200 hover:border-emerald-400",
+                      )}
+                    >
+                      <div className="relative aspect-video bg-slate-900">
+                        <MediaThumb creative={c} className="h-full w-full" />
+                        <span className="absolute inset-0 flex items-center justify-center bg-emerald-600/0 text-white opacity-0 transition group-hover:bg-emerald-600/45 group-hover:opacity-100">
+                          <Plus className="h-6 w-6" />
+                        </span>
+                        {count > 0 && (
+                          <span className="absolute top-1 right-1 rounded-md bg-emerald-600 px-1.5 text-[10px] font-bold text-white">
+                            ×{count}
+                          </span>
+                        )}
+                      </div>
+                      <div className="px-2 py-1.5">
+                        <p className="truncate text-[11px] font-semibold text-slate-800">{c.name}</p>
+                        <p className="flex items-center gap-1 text-[10px] text-slate-400">
+                          <KindIcon kind={c.kind} className="h-2.5 w-2.5" />
+                          {formatDuration(c.duration)}
+                        </p>
+                      </div>
+                    </button>
+                  );
+                })}
               </div>
             )}
           </div>
         </aside>
       </div>
 
-      {/* ==================== 4. BOTTOM PANEL: DANH SÁCH TRANG (SLIDES TIMELINE) ==================== */}
-      <footer className="shrink-0 border-t border-slate-200 bg-white p-3 shadow-xs">
-        <div className="flex items-center justify-between pb-2 text-xs">
-          <div className="flex items-center gap-2">
-            <span className="font-bold text-slate-800 uppercase tracking-wider">
-              Danh Sách Trang ({slides.length})
-            </span>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-50 px-2.5 py-0.5 text-[10px] font-bold text-emerald-700 border border-emerald-200">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
-              <span>120 FPS</span>
-            </span>
-          </div>
-        </div>
-
-        {/* Carousel of Slide Cards */}
-        <div className="flex items-center gap-3 overflow-x-auto pb-1">
-          {slides.map((slide, index) => {
-            const isSelected = selectedSlideIndex === index;
-
-            return (
-              <div
-                key={slide.id}
-                onClick={() => setSelectedSlideIndex(index)}
-                className={`relative flex flex-col justify-between rounded-xl border p-2 w-36 h-36 shrink-0 cursor-pointer transition ${
-                  isSelected
-                    ? "border-emerald-500 ring-2 ring-emerald-500/20 bg-emerald-50/40"
-                    : "border-slate-200 bg-slate-50/70 hover:border-slate-300 hover:bg-slate-50"
-                }`}
-              >
-                {/* Header of card: Index & Drag handle */}
-                <div className="flex items-center justify-between text-[11px] text-slate-500">
-                  <span className={`flex h-4 w-4 items-center justify-center rounded font-bold text-[10px] ${
-                    isSelected ? "bg-emerald-600 text-white" : "bg-slate-200 text-slate-700"
-                  }`}>
-                    {index + 1}
-                  </span>
-                  <span className="text-slate-400">⋮⋮</span>
-                </div>
-
-                {/* Thumbnail Preview */}
-                <div className="relative my-1 flex h-16 w-full items-center justify-center rounded-lg bg-slate-900 border border-slate-200 overflow-hidden">
-                  {slide.creative ? (
-                    slide.creative.kind === "image" ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        src={mediaUrl(slide.creative.url)}
-                        alt={slide.creative.name}
-                        className="h-full w-full object-cover"
-                      />
-                    ) : slide.creative.kind === "video" ? (
-                      <video
-                        src={mediaUrl(slide.creative.url)}
-                        muted
-                        className="h-full w-full object-cover"
-                      />
-                    ) : (
-                      <span className="text-xs font-bold text-slate-300">WEB</span>
-                    )
-                  ) : (
-                    <span className="text-xs font-bold text-slate-400">IMG</span>
-                  )}
-                </div>
-
-                {/* Duration & Card Actions Toolbar */}
-                <div className="flex items-center justify-between pt-1 border-t border-slate-200/80 text-[11px]">
-                  {/* Duration input */}
-                  <div className="flex items-center gap-1">
-                    <span className="text-slate-500 text-[10px]">Giây:</span>
-                    <input
-                      type="number"
-                      min={1}
-                      value={slide.duration}
-                      onClick={(e) => e.stopPropagation()}
-                      onChange={(e) => handleSlideDurationChange(index, Number(e.target.value))}
-                      className="w-9 rounded-md bg-white border border-slate-300 text-center font-bold text-slate-800 text-[10px] outline-none focus:border-emerald-500"
-                    />
-                  </div>
-
-                  {/* Actions: Reorder & Delete */}
-                  <div className="flex items-center gap-1 text-slate-400">
-                    <button
-                      type="button"
-                      disabled={index === 0}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleMoveSlide(index, -1);
-                      }}
-                      className="hover:text-slate-800 disabled:opacity-20 cursor-pointer font-bold"
-                      title="Chuyển sang trái"
-                    >
-                      ‹
-                    </button>
-                    <button
-                      type="button"
-                      disabled={index === slides.length - 1}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleMoveSlide(index, 1);
-                      }}
-                      className="hover:text-slate-800 disabled:opacity-20 cursor-pointer font-bold"
-                      title="Chuyển sang phải"
-                    >
-                      ›
-                    </button>
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleDeleteSlide(index);
-                      }}
-                      className="hover:text-rose-600 text-xs font-semibold text-slate-500 transition cursor-pointer"
-                      title="Xoá trang"
-                    >
-                      Xoá
-                    </button>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-
-          {/* "+ Thêm trang" Card */}
-          <button
-            type="button"
-            onClick={handleAddSlide}
-            className="flex flex-col items-center justify-center rounded-xl border-2 border-dashed border-slate-300 bg-slate-50/50 w-36 h-36 shrink-0 text-slate-500 hover:border-emerald-500 hover:bg-emerald-50/30 hover:text-emerald-700 transition cursor-pointer"
-          >
-            <span className="text-2xl font-bold mb-1">+</span>
-            <span className="text-xs font-semibold">Thêm trang</span>
-          </button>
-        </div>
-      </footer>
-
-      {/* ==================== MODAL: THÊM NỘI DUNG WEB (URL) ==================== */}
-      {showWebUrlModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+      {/* ==================== WEB URL ==================== */}
+      {showWeb && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4 backdrop-blur-xs" onClick={() => setShowWeb(false)}>
           <form
-            onSubmit={handleAddWebUrl}
-            className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl space-y-4"
+            onSubmit={handleAddWeb}
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-md space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl"
           >
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                <span>Thêm Nội Dung Web (URL)</span>
-              </h3>
-              <button
-                type="button"
-                onClick={() => setShowWebUrlModal(false)}
-                className="text-slate-400 hover:text-slate-600 font-bold cursor-pointer"
-              >
-                ✕
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-slate-900">Thêm trang web</h3>
+              <button type="button" onClick={() => setShowWeb(false)} aria-label="Đóng" className="rounded-lg p-1 text-slate-400 hover:bg-slate-100">
+                <X className="h-4 w-4" />
               </button>
             </div>
-
-            <div className="space-y-3 text-xs">
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Tên hiển thị</label>
-                <input
-                  type="text"
-                  placeholder="Ví dụ: Bảng giá chứng khoán, Live Dashboard..."
-                  value={webTitle}
-                  onChange={(e) => setWebTitle(e.target.value)}
-                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 outline-none focus:bg-white focus:border-emerald-500 transition"
-                  autoFocus
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Đường dẫn Website (URL)</label>
-                <input
-                  type="url"
-                  placeholder="https://example.com/widget..."
-                  value={webUrl}
-                  onChange={(e) => setWebUrl(e.target.value)}
-                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 outline-none focus:bg-white focus:border-emerald-500 transition"
-                  required
-                />
-              </div>
-
-              <div>
-                <label className="block font-semibold text-slate-700 mb-1">Thời lượng phát (giây)</label>
-                <input
-                  type="number"
-                  min={5}
-                  value={webDuration}
-                  onChange={(e) => setWebDuration(Number(e.target.value))}
-                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-900 outline-none focus:bg-white focus:border-emerald-500 transition"
-                />
-              </div>
-            </div>
-
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100 text-xs">
-              <button
-                type="button"
-                onClick={() => setShowWebUrlModal(false)}
-                className="rounded-xl border border-slate-200 bg-white px-3.5 py-1.5 font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
-              >
-                Hủy
+            <Input label="Tên hiển thị" value={web.title} onChange={(v) => setWeb({ ...web, title: v })} placeholder="Bảng giá, dashboard…" required autoFocus classNames={{ field: "h-9 rounded-xl", input: "text-xs", label: "text-xs" }} />
+            <Input label="Địa chỉ (URL)" type="url" value={web.url} onChange={(v) => setWeb({ ...web, url: v })} placeholder="https://…" required classNames={{ field: "h-9 rounded-xl", input: "text-xs", label: "text-xs" }} />
+            <Input
+              label="Thời lượng (giây)"
+              type="number"
+              min={5}
+              value={String(web.duration)}
+              onChange={(v) => setWeb({ ...web, duration: Number(v) })}
+              classNames={{ field: "h-9 rounded-xl", input: "text-xs", label: "text-xs" }}
+            />
+            <p className="text-[11px] text-slate-500">Một số trang chặn hiển thị trong khung (iframe) và sẽ hiện trống trên màn hình.</p>
+            <div className="flex justify-end gap-2 text-xs">
+              <button type="button" onClick={() => setShowWeb(false)} className="rounded-xl border border-slate-200 px-3.5 py-2 font-medium text-slate-600 hover:bg-slate-50">
+                Huỷ
               </button>
-              <button
-                type="submit"
-                disabled={!webUrl.trim() || !webTitle.trim() || saving}
-                className="rounded-xl bg-emerald-600 px-4 py-1.5 font-bold text-white hover:bg-emerald-700 disabled:opacity-50 cursor-pointer shadow-xs"
-              >
-                {saving ? "Đang thêm..." : "Thêm vào Playlist"}
+              <button type="submit" disabled={saving || !web.title.trim() || !web.url.trim()} className="rounded-xl bg-emerald-600 px-4 py-2 font-bold text-white hover:bg-emerald-700 disabled:opacity-50">
+                Thêm vào playlist
               </button>
             </div>
           </form>
         </div>
       )}
 
-      {/* Screen Selection Modal */}
-      {showScreenModal && fullPlaylist && (
+      {publishing && (
         <SelectScreenModal
-          playlist={fullPlaylist}
-          onClose={() => setShowScreenModal(false)}
-          onSuccess={() => {
-            setShowScreenModal(false);
-            setInfo("Đã kích hoạt phát playlist lên các thiết bị đã chọn!");
-            setTimeout(() => setInfo(null), 3500);
+          playlist={publishing}
+          onClose={() => setPublishing(null)}
+          onSuccess={async () => {
+            setPublishing(null);
+            if (saved?.id) applyLoaded(await api.getPlaylist(saved.id));
+            flash("Đã cập nhật phát playlist lên thiết bị.");
           }}
         />
       )}

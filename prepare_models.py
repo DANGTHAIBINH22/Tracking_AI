@@ -70,31 +70,42 @@ def check_and_prepare_yolo() -> bool:
 
 
 def check_and_prepare_yolo_pets() -> bool:
-    """Kiểm tra hoặc tải tự động YOLOv8n COCO weights cho nhận diện Thú cưng (Chó & Mèo)."""
-    weights_path = MODELS_DIR / "yolov8n.pt"
-    url = "https://github.com/ultralytics/assets/releases/download/v8.2.0/yolov8n.pt"
+    """Kiểm tra hoặc tải tự động weights COCO cho nhận diện động vật (CFG.pet_weights, YOLO11m)."""
+    from configs import CFG
+
+    weights_path = CFG.pet_weights
+    url = f"https://github.com/ultralytics/assets/releases/download/v8.3.0/{weights_path.name}"
 
     if weights_path.exists() and weights_path.stat().st_size > 1_000_000:
         size_mb = weights_path.stat().st_size / (1024 * 1024)
-        print(f"[✓] YOLOv8n-COCO (Pets): Đã sẵn sàng ({size_mb:.1f} MB tại {weights_path})")
+        print(f"[✓] {weights_path.name} (Động vật): Đã sẵn sàng ({size_mb:.1f} MB tại {weights_path})")
         return True
 
-    print("[!] Chưa tìm thấy YOLOv8n weights. Đang tiến hành tải tự động...")
-    ok = download_with_progress(url, weights_path, desc="Tải YOLOv8n (Pet Detection)")
+    print(f"[!] Chưa tìm thấy {weights_path.name}. Đang tiến hành tải tự động...")
+    ok = download_with_progress(url, weights_path, desc=f"Tải {weights_path.name} (Animal Detection)")
     return ok and weights_path.exists()
 
 
 
 def check_and_prepare_mivolo() -> bool:
-    """Kiểm tra mô hình MiVOLO v2 ONNX và tệp dữ liệu trọng số, hoặc tự động xuất từ Hugging Face."""
+    """Kiểm tra đường suy luận tuổi/giới tính, xuất ONNX từ Hugging Face nếu cần."""
     onnx_graph = MODELS_DIR / "mivolo_age_gender.onnx"
-    onnx_data = MODELS_DIR / "mivolo_age_gender.onnx.data"
+    ckpt = MODELS_DIR / "mivolo_v2_lagenda.pth.tar"
 
-    has_graph = onnx_graph.exists() and onnx_graph.stat().st_size > 500_000
-    has_data = onnx_data.exists() and onnx_data.stat().st_size > 50_000_000
+    # AgeGenderEstimator ưu tiên ONNX TRƯỚC .pth.tar, nên xuất ONNX ở đây sẽ âm
+    # thầm thay đường suy luận của một máy đang chạy tốt. Checkpoint v2 đã được
+    # đo trên eval/age_kids (91%, MAE 3.35y); bản ONNX thì chưa. Ai thực sự cần
+    # ONNX thì chạy thẳng export_mivolo_onnx.py.
+    if ckpt.exists() and not onnx_graph.exists():
+        size_mb = ckpt.stat().st_size / (1024 * 1024)
+        print(f"[✓] MiVOLO v2 (.pth.tar): Đã sẵn sàng ({size_mb:.1f} MB tại {ckpt})")
+        print("    (Bỏ qua xuất ONNX: checkpoint này sẽ bị ONNX chiếm quyền ưu tiên.")
+        print("     Cần ONNX thì chạy: uv run python export_mivolo_onnx.py)")
+        return True
 
-    if has_graph and has_data:
-        # Kiểm tra tính toàn vẹn và suy luận thử nghiệm qua ONNX Runtime
+    if onnx_graph.exists() and onnx_graph.stat().st_size > 500_000:
+        # Suy luận thử một lần là đủ để kết luận: nếu trọng số nằm ở sidecar
+        # .onnx.data mà file đó thiếu, onnxruntime sẽ ném lỗi ngay tại đây.
         try:
             import numpy as np
             import onnxruntime as ort
@@ -103,19 +114,17 @@ def check_and_prepare_mivolo() -> bool:
             opts.log_severity_level = 3
             sess = ort.InferenceSession(str(onnx_graph), opts, providers=["CPUExecutionProvider"])
             inp_name = sess.get_inputs()[0].name
-            test_in = np.zeros((1, 3, 384, 384), dtype=np.float32)
-            _ = sess.run(None, {inp_name: test_in})
-            size_mb = (onnx_graph.stat().st_size + onnx_data.stat().st_size) / (1024 * 1024)
+            _ = sess.run(None, {inp_name: np.zeros((1, 3, 384, 384), dtype=np.float32)})
+            size_mb = sum(p.stat().st_size for p in MODELS_DIR.glob("mivolo_age_gender.onnx*")) / (1024 * 1024)
             print(f"[✓] MiVOLO v2 ONNX: Đã sẵn sàng & kiểm tra suy luận thành công ({size_mb:.1f} MB, Input: {inp_name})")
             return True
         except Exception as e:
             print(f"[!] Cảnh báo kiểm tra ONNX: {e}. Tiến hành xuất lại mô hình...")
 
-    print("[!] Chưa có file MiVOLO v2 ONNX hoặc file bị lỗi. Tiến hành xuất tự động từ Hugging Face...")
+    print("[!] Chưa có đường suy luận tuổi nào. Tiến hành xuất ONNX tự động từ Hugging Face...")
     try:
         from export_mivolo_onnx import export_onnx
-        ok = export_onnx(str(onnx_graph))
-        return ok and onnx_graph.exists() and onnx_data.exists()
+        return bool(export_onnx(str(onnx_graph))) and onnx_graph.exists()
     except Exception as e:
         print(f"[!] Lỗi xuất MiVOLO v2 ONNX: {e}")
         print("    👉 Gợi ý: Chạy lệnh độc lập để gỡ lỗi: uv run python export_mivolo_onnx.py")
@@ -217,8 +226,8 @@ def main():
     print("📊 BẢNG TỔNG HỢP TRẠNG THÁI HỆ THỐNG (READINESS CHECKLIST)")
     print("=" * 66)
     print(f"  1. YOLOv8-Face (Detection):       {'[✓] SẴN SÀNG' if status_yolo else '[❌] THIẾU'}")
-    print(f"  2. YOLOv8n-COCO (Pet Tracking):   {'[✓] SẴN SÀNG' if status_pets else '[❌] THIẾU'}")
-    print(f"  3. MiVOLO v2 ONNX (Age & Gender): {'[✓] SẴN SÀNG' if status_mivolo else '[❌] THIẾU'}")
+    print(f"  2. YOLO11m-COCO (Động vật):       {'[✓] SẴN SÀNG' if status_pets else '[❌] THIẾU'}")
+    print(f"  3. MiVOLO v2 (Age & Gender):      {'[✓] SẴN SÀNG' if status_mivolo else '[❌] THIẾU'}")
     print(f"  4. Moondream2 (Ambient VLM):      {'[✓] SẴN SÀNG / SKIP' if status_vlm else '[!] CHƯA TẢI'}")
     print(f"  5. Video Clips Quảng Cáo Demo:    {'[✓] ' + str(ad_count) + ' VIDEOS' if ad_count > 0 else '[❌] THIẾU'}")
     print("=" * 66)
@@ -226,8 +235,10 @@ def main():
     if status_yolo and status_mivolo and status_pets:
         print(f"🎉 TẤT CẢ TÀI NGUYÊN CỐT LÕI ĐÃ SẴN SÀNG! (Thời gian kiểm tra: {elapsed:.2f}s)")
         print("👉 Bây giờ bạn có thể khởi chạy ứng dụng:")
-        print("   - Khởi động Backend: uv run python run_server.py")
-        print("   - Khởi động Frontend Web: cd web && npm run dev")
+        print("   - Toàn bộ hệ thống (PostgreSQL + API + dashboard): ./run_web.sh")
+        print("   - Hoặc tách hai nửa khi cần gỡ lỗi:")
+        print("       uv run uvicorn server.main:app --reload --port 8000")
+        print("       cd web && npm run dev")
     else:
         print("⚠️ Vẫn còn một số trọng số chưa được thiết lập đầy đủ. Vui lòng kiểm tra lại log bên trên.")
 

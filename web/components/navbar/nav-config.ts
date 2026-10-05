@@ -15,12 +15,6 @@ export const SCREEN_OPTIONS: ScreenOption[] = [
     action: "modal",
   },
   {
-    id: "tv-screen",
-    label: "Màn hình TV Client",
-    description: "Giao diện chạy trực tiếp trên Smart TV hoặc Android Box",
-    href: "/screen",
-  },
-  {
     id: "homescreen",
     label: "Homescreen Display",
     description: "Màn hình trình chiếu vòng lặp AI tự động",

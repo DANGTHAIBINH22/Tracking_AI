@@ -25,6 +25,16 @@
   --color-accent-dim: var(--accent-dim);
   --color-warn: var(--warn);
   --color-danger: var(--danger);
+
+  /* Names the beUI components in components/motion/ expect, mapped onto the
+     palette above. `muted` is already a text colour here, so beUI's bg-muted
+     was swapped for bg-surface-2 in those files. */
+  --color-card: var(--surface);
+  --color-muted-foreground: var(--muted);
+  --color-primary: var(--foreground);
+  --color-primary-foreground: #ffffff;
+  --color-destructive: var(--danger);
+  --color-ring: var(--accent);
 }
 
 body {

@@ -2,58 +2,30 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { UserPublic, api, clearAuthSession, getAuthToken, getStoredUser, setStoredUser } from "@/lib/api";
-import { IS_CLERK_ENABLED } from "@/components/ClerkWrapper";
-import { ClerkAuthNav } from "@/components/ClerkAuthNav";
+import { useRouter } from "next/navigation";
+import { api, clearAuthSession, getAuthToken, getStoredUser, setStoredUser } from "@/lib/api";
+import { useStoredUser } from "@/lib/useBrowserState";
 
 interface NavUserMenuProps {
   onLogoutSuccess?: () => void;
 }
 
 export function NavUserMenu({ onLogoutSuccess }: NavUserMenuProps) {
-  const [currentUser, setCurrentUser] = useState<UserPublic | null>({
-    id: 1,
-    username: "admin",
-    full_name: "Quản trị viên",
-    role: "admin",
-  });
+  const router = useRouter();
+  const currentUser = useStoredUser();
   const [loggingOut, setLoggingOut] = useState(false);
 
   useEffect(() => {
-    // 1. Sync immediately from stored state
-    const savedUser = getStoredUser();
-    if (savedUser) {
-      setCurrentUser(savedUser);
+    // Validate the stored session once; the stored user itself is read live
+    // through useStoredUser, so login/logout elsewhere updates this too.
+    if (!getAuthToken()) {
+      if (getStoredUser()) clearAuthSession();
+      return;
     }
-
-    // 2. Validate token with API on initial mount only
-    const token = getAuthToken();
-    if (token) {
-      api
-        .me()
-        .then((user) => {
-          setCurrentUser(user);
-          setStoredUser(user);
-        })
-        .catch(() => {
-          clearAuthSession();
-          setCurrentUser(null);
-        });
-    } else {
-      setCurrentUser(null);
-    }
-
-    // 3. When auth changes (login / logout), read stored state without re-calling api.me()
-    const handleAuthChange = () => {
-      setCurrentUser(getStoredUser());
-    };
-
-    window.addEventListener("auth-change", handleAuthChange);
-    window.addEventListener("storage", handleAuthChange);
-    return () => {
-      window.removeEventListener("auth-change", handleAuthChange);
-      window.removeEventListener("storage", handleAuthChange);
-    };
+    api
+      .me()
+      .then((user) => setStoredUser(user))
+      .catch(() => clearAuthSession());
   }, []);
 
   const handleLogout = async () => {
@@ -65,12 +37,11 @@ export function NavUserMenu({ onLogoutSuccess }: NavUserMenuProps) {
       // ignore
     } finally {
       clearAuthSession();
-      setCurrentUser(null);
       setLoggingOut(false);
       if (onLogoutSuccess) {
         onLogoutSuccess();
       }
-      window.location.href = "/login";
+      router.replace("/login");
     }
   };
 
@@ -111,10 +82,6 @@ export function NavUserMenu({ onLogoutSuccess }: NavUserMenuProps) {
         </button>
       </div>
     );
-  }
-
-  if (IS_CLERK_ENABLED) {
-    return <ClerkAuthNav />;
   }
 
   return (

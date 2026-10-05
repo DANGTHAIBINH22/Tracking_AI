@@ -60,8 +60,11 @@ class LocalCameraSource:
             cap.release()
             raise RuntimeError(f"Không mở được nguồn video/camera: {self.spec!r}")
         if not self.is_file:
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            # 1280x720, not 640x480: on a Mac 640x480 is a centre crop of the
+            # sensor (narrower view) at below the 960px the detector now runs
+            # at, so anyone not right at the screen was a face too small to find.
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
             cap.set(cv2.CAP_PROP_FPS, 30)
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
             self._cap = cap

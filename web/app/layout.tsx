@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { ClerkAppProvider } from "@/components/ClerkWrapper";
 import { AppShell } from "@/components/layout/AppShell";
 
 export const metadata: Metadata = {
@@ -16,9 +15,7 @@ export default function RootLayout({
   return (
     <html lang="vi" suppressHydrationWarning>
       <body className="min-h-screen antialiased bg-[#f8fafc]" suppressHydrationWarning>
-        <ClerkAppProvider>
-          <AppShell>{children}</AppShell>
-        </ClerkAppProvider>
+        <AppShell>{children}</AppShell>
       </body>
     </html>
   );

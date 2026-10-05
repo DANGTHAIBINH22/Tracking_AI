@@ -26,7 +26,7 @@ from pydantic import BaseModel
 
 from server import db
 from server.audience import AGE_GROUPS
-from server.auth import get_current_user
+from server.auth import fetch_owned, get_current_user, scope
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
@@ -253,8 +253,9 @@ def list_sessions(
 ) -> list[SessionSummary]:
     """List tracking sessions, optionally filtered by device_id or screen_id."""
     now = time.time()
-    conditions = []
-    params = []
+    own_cond, own_params = scope(user)
+    conditions = [own_cond]
+    params = list(own_params)
 
     if device_id:
         conditions.append("device_id = %s")
@@ -278,15 +279,159 @@ def list_sessions(
     return [_summarize(r, now, with_tracks=False) for r in rows]
 
 
+class DayAd(BaseModel):
+    name: str
+    seconds: float
+
+
+class DayPerson(BaseModel):
+    """One person the device saw, as one row of the day's log."""
+    seq: int                      # 1-based, in order of arrival
+    session_code: str
+    track_id: int
+    first_seen: float
+    last_seen: float
+    presence_seconds: float
+    dwell_seconds: float
+    attentive_share: float        # attentive frames / frames, 0..1
+    viewed: bool                  # dwell >= min_attention_seconds: an impression
+    gender: str | None = None     # "M" | "F"
+    age: int | None = None
+    age_group: str | None = None
+    has_pet: bool = False
+    pet_type: str | None = None
+    clothing_color: str | None = None
+    clothing_style: str | None = None
+    ads: list[DayAd] = []         # adverts on air while the person was present, longest first
+    watched: list[DayAd] = []     # adverts the person actually looked at, by attention seconds
+
+
+class DayLog(BaseModel):
+    date: str
+    end_date: str
+    device_id: str
+    sessions: int
+    people: list[DayPerson]
+
+
+def _gender_code(value: Any) -> str | None:
+    text = str(value or "").strip().lower()
+    return "M" if text in ("m", "nam", "male") else "F" if text in ("f", "nữ", "nu", "female") else None
+
+
+@router.get("/day", response_model=DayLog)
+def day_log(
+    device_id: str = Query(...),
+    date: str = Query(..., description="YYYY-MM-DD, in the viewer's calendar"),
+    end_date: str | None = Query(None, description="Last day of a range, inclusive; defaults to `date`"),
+    tz_offset: int = Query(0, description="JS getTimezoneOffset(): minutes behind UTC"),
+    user: Annotated[dict, Depends(get_current_user)] = None,
+) -> DayLog:
+    """Everyone the device saw on one day (or `date`..`end_date`), across all
+    its sessions, oldest first.
+
+    Sessions are how capture is chunked, not how an operator thinks about a
+    screen; this flattens them into one log per calendar day. Each person also
+    carries the adverts that were on air while they stood there, from the
+    airings table — one playlist airs system-wide, so time overlap is enough.
+    """
+    try:
+        day = datetime.strptime(date, "%Y-%m-%d")
+        last = datetime.strptime(end_date, "%Y-%m-%d") if end_date else day
+    except ValueError as exc:
+        raise HTTPException(400, "Ngày không hợp lệ (cần YYYY-MM-DD).") from exc
+    if last < day:
+        raise HTTPException(400, "Ngày kết thúc phải sau ngày bắt đầu.")
+    if (last - day).days > 92:
+        raise HTTPException(400, "Khoảng ngày tối đa 93 ngày.")
+    # Midnight in the viewer's timezone, as a Unix timestamp. tz_offset is the
+    # offset at `date`; a DST change inside a range shifts the far edge by an hour.
+    start = (day - datetime(1970, 1, 1)).total_seconds() + tz_offset * 60
+    end = start + ((last - day).days + 1) * 86400
+
+    own_cond, own_params = scope(user)
+    rows = db.query(
+        f"""SELECT session_code, tracks_json FROM tracking_sessions
+            WHERE {own_cond} AND device_id = %s
+              AND started_at < %s AND COALESCE(ended_at, %s) >= %s
+            ORDER BY started_at""",
+        (*own_params, str(device_id), end, time.time(), start),
+    )
+
+    people: list[dict] = []
+    for row in rows:
+        for t in _loads(row.get("tracks_json"), []):
+            first = float(t.get("first_seen") or 0)
+            if not (start <= first < end):
+                continue
+            frames = int(t.get("frames") or 0)
+            # A face held for a frame or two with nothing read off it is a
+            # tracker artefact, not a passer-by; counting it inflated footfall.
+            if float(t.get("presence_seconds") or 0) < 1.0 and not t.get("gender") and t.get("age") is None:
+                continue
+            people.append({
+                "session_code": row["session_code"],
+                "track_id": int(t.get("track_id") or 0),
+                "first_seen": first,
+                "last_seen": float(t.get("last_seen") or first),
+                "presence_seconds": round(float(t.get("presence_seconds") or 0), 1),
+                "dwell_seconds": round(float(t.get("dwell_seconds") or 0), 1),
+                "attentive_share": round(int(t.get("attentive_frames") or 0) / frames, 2) if frames else 0.0,
+                "gender": _gender_code(t.get("gender")),
+                "age": _whole(t.get("age")),
+                "age_group": t.get("age_group"),
+                "has_pet": bool(t.get("has_pet")),
+                "pet_type": t.get("pet_type"),
+                "clothing_color": t.get("clothing_color"),
+                "clothing_style": t.get("clothing_style"),
+            })
+    people.sort(key=lambda p: p["first_seen"])
+
+    # Adverts on air during each person's stay: one query for the day, then
+    # interval overlap in Python (a day is a few hundred airings at most).
+    airings = db.query(
+        """SELECT a.started_at, COALESCE(a.ended_at, %s) AS ended_at, c.name
+           FROM airings a JOIN creatives c ON c.id = a.creative_id
+           WHERE a.started_at < %s AND COALESCE(a.ended_at, %s) > %s
+           ORDER BY a.started_at""",
+        (time.time(), end, time.time(), start),
+    )
+    # What each person looked at: the capture loop writes one impressions row
+    # per (airing, track) with the attention measured during that airing.
+    # Track ids restart with every session, so a row belongs to a person only
+    # if its track id matches and it falls inside their stay.
+    looks = db.query(
+        """SELECT i.track_id, i.first_seen, i.attention_seconds, c.name
+           FROM impressions i JOIN creatives c ON c.id = i.creative_id
+           WHERE i.first_seen >= %s AND i.first_seen < %s AND i.attention_seconds > 0""",
+        (start - 3600, end),
+    )
+    from server.settings import SETTINGS
+
+    out = []
+    for i, p in enumerate(people, start=1):
+        seen: dict[str, float] = {}
+        for lk in looks:
+            if lk["track_id"] == p["track_id"] and p["first_seen"] - 1 <= lk["first_seen"] <= p["last_seen"] + 1:
+                seen[lk["name"]] = seen.get(lk["name"], 0.0) + float(lk["attention_seconds"])
+        watched = [DayAd(name=n, seconds=round(v, 1)) for n, v in sorted(seen.items(), key=lambda kv: -kv[1]) if v >= 0.1]
+        overlap: dict[str, float] = {}
+        for a in airings:
+            sec = min(p["last_seen"], a["ended_at"]) - max(p["first_seen"], a["started_at"])
+            if sec > 0.5:
+                overlap[a["name"]] = overlap.get(a["name"], 0.0) + sec
+        ads = [DayAd(name=n, seconds=round(v, 1)) for n, v in sorted(overlap.items(), key=lambda kv: -kv[1])]
+        out.append(DayPerson(seq=i, viewed=p["dwell_seconds"] >= SETTINGS.min_attention_seconds, ads=ads, watched=watched, **p))
+    return DayLog(date=date, end_date=last.strftime("%Y-%m-%d"), device_id=str(device_id), sessions=len(rows), people=out)
+
+
 @router.get("/{session_id}", response_model=SessionSummary)
 def get_session(
     session_id: int,
     user: Annotated[dict, Depends(get_current_user)] = None,
 ) -> SessionSummary:
     """Retrieve details for a specific tracking session, including every track."""
-    row = db.query_one("SELECT * FROM tracking_sessions WHERE id = %s", (session_id,))
-    if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy phiên thu thập này.")
+    row = fetch_owned("tracking_sessions", session_id, user, "Không tìm thấy phiên thu thập này.")
     return _summarize(row, time.time(), with_tracks=True)
 
 
@@ -296,9 +441,7 @@ def delete_session(
     user: Annotated[dict, Depends(get_current_user)] = None,
 ) -> dict:
     """Delete a tracking session record."""
-    row = db.query_one("SELECT id FROM tracking_sessions WHERE id = %s", (session_id,))
-    if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy phiên cần xoá.")
+    fetch_owned("tracking_sessions", session_id, user, "Không tìm thấy phiên cần xoá.")
     db.execute("DELETE FROM tracking_sessions WHERE id = %s", (session_id,))
     return {"ok": True, "deleted_id": session_id}
 
@@ -309,9 +452,7 @@ def export_session_csv(
     user: Annotated[dict, Depends(get_current_user)] = None,
 ) -> Response:
     """Export all tracked people in this session as a CSV file."""
-    row = db.query_one("SELECT * FROM tracking_sessions WHERE id = %s", (session_id,))
-    if not row:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Không tìm thấy phiên thu thập.")
+    row = fetch_owned("tracking_sessions", session_id, user, "Không tìm thấy phiên thu thập.")
 
     summary = _summarize(row, time.time(), with_tracks=True)
     buf = io.StringIO()

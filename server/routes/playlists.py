@@ -6,23 +6,35 @@ import shutil
 import time
 import uuid
 from pathlib import Path
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from server import db
 from server.audience import normalize_target_age
+from server.auth import fetch_owned, get_current_user, is_admin, scope
 from server.routes.ads import IMAGE_EXT, VIDEO_EXT, _video_duration, to_public
 from server.schemas import (
     PlaylistActivateRequest,
     PlaylistCreate,
     PlaylistItemAdd,
+    PlaylistCover,
     PlaylistItemOrder,
     PlaylistItemPublic,
+    PlaylistItemsReplace,
     PlaylistPublic,
     PlaylistUpdate,
 )
 from server.settings import MEDIA_DIR, SETTINGS
 
 router = APIRouter(prefix="/api/playlists", tags=["playlists"])
+
+User = Annotated[dict, Depends(get_current_user)]
+_NOT_FOUND = "Không tìm thấy playlist"
+
+
+def _owned(playlist_id: int, user: dict) -> dict:
+    return fetch_owned("playlists", playlist_id, user, _NOT_FOUND)
 
 
 def _invalidate_player_cache() -> None:
@@ -113,14 +125,32 @@ def _to_playlist_public(row: dict, load_items: bool = False) -> PlaylistPublic:
     assigned_screen_ids = [s["id"] for s in assigned_screens]
     assigned_screen_names = [s["name"] or f"Thiết bị #{s['id']}" for s in assigned_screens]
 
+    # Only one playlist is on air system-wide. A screen still assigned to a
+    # playlist that is not on air idles, so that playlist must not read
+    # "Đang phát" — it used to, which is how a black screen looked healthy here.
     is_active = bool(row.get("is_active", False))
-    if assigned_screens:
-        if len(assigned_screens) == 1:
-            publish_status = f"Đang phát ở: {assigned_screen_names[0]}"
-        else:
-            publish_status = f"Đang phát ở {len(assigned_screens)} thiết bị"
+    where = (
+        assigned_screen_names[0] if len(assigned_screens) == 1 else f"{len(assigned_screens)} thiết bị"
+    )
+    if is_active and assigned_screens:
+        publish_status = f"Đang phát ở: {where}"
+    elif is_active:
+        publish_status = "Đang phát · chưa gán thiết bị nào"
+    elif assigned_screens:
+        publish_status = f"Đã gán {where} · đang dừng"
     else:
-        publish_status = "Chưa chọn thiết bị phát" if not is_active else "Chưa có thiết bị kết nối"
+        publish_status = "Chưa phát"
+
+    # A few thumbnails for the list, which loads no items.
+    covers = [
+        PlaylistCover(kind=r["kind"], url=r["filename"] if r["kind"] == "web" else f"/media/{r['filename']}")
+        for r in db.query(
+            """SELECT c.kind, c.filename FROM playlist_items pi
+               JOIN creatives c ON pi.creative_id = c.id
+               WHERE pi.playlist_id = %s ORDER BY pi.position ASC, pi.id ASC LIMIT 4""",
+            (pid,),
+        )
+    ]
 
     return PlaylistPublic(
         id=pid,
@@ -136,25 +166,28 @@ def _to_playlist_public(row: dict, load_items: bool = False) -> PlaylistPublic:
         item_count=item_count,
         total_duration=round(total_duration, 2),
         items=items,
+        covers=covers,
         assigned_screen_ids=assigned_screen_ids,
         assigned_screen_names=assigned_screen_names,
+        user_id=row.get("user_id"),
     )
 
 
 @router.get("", response_model=list[PlaylistPublic])
-def list_playlists() -> list[PlaylistPublic]:
-    rows = db.query("SELECT * FROM playlists ORDER BY is_active DESC, id ASC")
+def list_playlists(user: User) -> list[PlaylistPublic]:
+    cond, params = scope(user)
+    rows = db.query(f"SELECT * FROM playlists WHERE {cond} ORDER BY is_active DESC, id ASC", params)
     return [_to_playlist_public(r, load_items=False) for r in rows]
 
 
 @router.post("", response_model=PlaylistPublic, status_code=201)
-def create_playlist(body: PlaylistCreate) -> PlaylistPublic:
+def create_playlist(body: PlaylistCreate, user: User) -> PlaylistPublic:
     if body.is_active:
         db.execute("UPDATE playlists SET is_active = FALSE")
     publish_status = "published" if body.is_active else "unpublish"
     new_id = db.insert(
-        """INSERT INTO playlists (name, description, is_active, created_at, kind, aspect_ratio, sync_playback, fit_screen, publish_status)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+        """INSERT INTO playlists (name, description, is_active, created_at, kind, aspect_ratio, sync_playback, fit_screen, publish_status, user_id)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
         (
             body.name.strip(),
             body.description.strip(),
@@ -165,6 +198,7 @@ def create_playlist(body: PlaylistCreate) -> PlaylistPublic:
             body.sync_playback,
             body.fit_screen,
             publish_status,
+            user["id"],
         ),
     )
     if body.is_active:
@@ -174,18 +208,14 @@ def create_playlist(body: PlaylistCreate) -> PlaylistPublic:
 
 
 @router.get("/{playlist_id}", response_model=PlaylistPublic)
-def get_playlist(playlist_id: int) -> PlaylistPublic:
-    row = db.query_one("SELECT * FROM playlists WHERE id = %s", (playlist_id,))
-    if not row:
-        raise HTTPException(404, "Không tìm thấy playlist")
+def get_playlist(playlist_id: int, user: User) -> PlaylistPublic:
+    row = _owned(playlist_id, user)
     return _to_playlist_public(row, load_items=True)
 
 
 @router.patch("/{playlist_id}", response_model=PlaylistPublic)
-def update_playlist(playlist_id: int, patch: PlaylistUpdate) -> PlaylistPublic:
-    row = db.query_one("SELECT * FROM playlists WHERE id = %s", (playlist_id,))
-    if not row:
-        raise HTTPException(404, "Không tìm thấy playlist")
+def update_playlist(playlist_id: int, patch: PlaylistUpdate, user: User) -> PlaylistPublic:
+    _owned(playlist_id, user)
 
     fields = {k: v for k, v in patch.model_dump(exclude_unset=True).items() if v is not None}
     if "is_active" in fields and fields["is_active"]:
@@ -212,18 +242,21 @@ def update_playlist(playlist_id: int, patch: PlaylistUpdate) -> PlaylistPublic:
 
 
 @router.delete("/{playlist_id}", status_code=204)
-def delete_playlist(playlist_id: int) -> None:
-    row = db.query_one("SELECT * FROM playlists WHERE id = %s", (playlist_id,))
-    if not row:
-        raise HTTPException(404, "Không tìm thấy playlist")
+def delete_playlist(playlist_id: int, user: User) -> None:
+    row = _owned(playlist_id, user)
     was_active = bool(row.get("is_active", False))
     db.execute("DELETE FROM playlists WHERE id = %s", (playlist_id,))
     _invalidate_player_cache()
 
     from server.state import PLAYER
     if was_active:
-        # If the active playlist was deleted, activate another if one exists
-        other = db.query_one("SELECT id FROM playlists ORDER BY id ASC LIMIT 1")
+        # If the active playlist was deleted, fall back to another of the SAME
+        # owner. Picking any playlist would put a different account's adverts
+        # on air without that account asking for it.
+        other = db.query_one(
+            "SELECT id FROM playlists WHERE user_id IS NOT DISTINCT FROM %s ORDER BY id ASC LIMIT 1",
+            (row.get("user_id"),),
+        )
         if other:
             db.execute("UPDATE playlists SET is_active = TRUE WHERE id = %s", (other["id"],))
             PLAYER.skip()
@@ -238,11 +271,31 @@ def delete_playlist(playlist_id: int) -> None:
 
 
 @router.post("/{playlist_id}/activate", response_model=PlaylistPublic)
-def activate_playlist(playlist_id: int, body: PlaylistActivateRequest | None = None) -> PlaylistPublic:
-    """Set this playlist as the active one broadcasting to Homescreen & selected screens."""
-    row = db.query_one("SELECT * FROM playlists WHERE id = %s", (playlist_id,))
-    if not row:
-        raise HTTPException(404, "Không tìm thấy playlist")
+def activate_playlist(
+    playlist_id: int,
+    user: User,
+    body: PlaylistActivateRequest | None = None,
+) -> PlaylistPublic:
+    """Set this playlist as the active one broadcasting to Homescreen & selected screens.
+
+    Only one playlist is on air system-wide (one PlaylistPlayer). Screens only
+    show it when it is the playlist assigned to them (`on_air` in verify-token),
+    so another account's screens idle rather than showing these adverts.
+    """
+    row = _owned(playlist_id, user)
+    # An empty playlist on air leaves every assigned screen black with nothing
+    # to explain why; say so here instead.
+    if not db.query_one("SELECT 1 FROM playlist_items WHERE playlist_id = %s LIMIT 1", (playlist_id,)):
+        raise HTTPException(400, "Playlist chưa có media nào — thêm nội dung trước khi phát.")
+    screen_cond, screen_params = scope(user)
+    if body and body.screen_ids:
+        # Every requested screen must be one this account manages.
+        owned = db.query(
+            f"SELECT id FROM screens WHERE id = ANY(%s) AND {screen_cond}",
+            (list(body.screen_ids), *screen_params),
+        )
+        if len(owned) != len(set(body.screen_ids)):
+            raise HTTPException(404, "Có thiết bị không tồn tại hoặc không thuộc tài khoản của bạn.")
 
     # Set as active playlist
     db.execute("UPDATE playlists SET is_active = FALSE")
@@ -262,10 +315,18 @@ def activate_playlist(playlist_id: int, body: PlaylistActivateRequest | None = N
             (playlist_id, *body.screen_ids),
         )
     else:
-        # Default: if no specific screen_ids given, assign all paired screens
-        paired_screens = db.query("SELECT id FROM screens WHERE status = 'paired'")
+        # Default: no screens named means every paired screen of the playlist's
+        # owner — never other accounts' screens, even when an admin activates.
+        owner_id = row.get("user_id")
+        paired_screens = db.query(
+            "SELECT id FROM screens WHERE status = 'paired' AND user_id IS NOT DISTINCT FROM %s",
+            (owner_id,),
+        )
         if paired_screens:
-            db.execute("UPDATE screens SET playlist_id = %s WHERE status = 'paired'", (playlist_id,))
+            db.execute(
+                "UPDATE screens SET playlist_id = %s WHERE status = 'paired' AND user_id IS NOT DISTINCT FROM %s",
+                (playlist_id, owner_id),
+            )
         else:
             db.execute("UPDATE screens SET playlist_id = NULL WHERE playlist_id = %s", (playlist_id,))
 
@@ -284,11 +345,9 @@ def activate_playlist(playlist_id: int, body: PlaylistActivateRequest | None = N
 
 
 @router.post("/{playlist_id}/deactivate", response_model=PlaylistPublic)
-def deactivate_playlist(playlist_id: int) -> PlaylistPublic:
+def deactivate_playlist(playlist_id: int, user: User) -> PlaylistPublic:
     """Stop playing this playlist and unassign from all screens."""
-    row = db.query_one("SELECT * FROM playlists WHERE id = %s", (playlist_id,))
-    if not row:
-        raise HTTPException(404, "Không tìm thấy playlist")
+    _owned(playlist_id, user)
 
     db.execute("UPDATE playlists SET is_active = FALSE WHERE id = %s", (playlist_id,))
     db.execute("UPDATE screens SET playlist_id = NULL WHERE playlist_id = %s", (playlist_id,))
@@ -305,16 +364,47 @@ def deactivate_playlist(playlist_id: int) -> PlaylistPublic:
     return _to_playlist_public(row, load_items=True)
 
 
-@router.post("/{playlist_id}/items", response_model=PlaylistPublic)
-def add_item_to_playlist(playlist_id: int, body: PlaylistItemAdd) -> PlaylistPublic:
-    """Add a media creative from the Media Library into this playlist."""
-    pl_row = db.query_one("SELECT * FROM playlists WHERE id = %s", (playlist_id,))
-    if not pl_row:
-        raise HTTPException(404, "Không tìm thấy playlist")
+@router.put("/{playlist_id}/items", response_model=PlaylistPublic)
+def replace_playlist_items(playlist_id: int, body: PlaylistItemsReplace, user: User) -> PlaylistPublic:
+    """Replace the playlist's items with the editor's list, in one transaction.
 
-    cr_row = db.query_one("SELECT * FROM creatives WHERE id = %s", (body.creative_id,))
-    if not cr_row:
-        raise HTTPException(404, "Không tìm thấy tệp media trong kho")
+    The editor used to delete every item and add them back one request at a
+    time: an on-air playlist went empty for the whole save, and a request that
+    failed halfway left it with half its content and nothing to restore from.
+    """
+    pl_row = _owned(playlist_id, user)
+    ids = list({it.creative_id for it in body.items})
+    if ids:
+        cond, params = scope(user)
+        owned = db.query(f"SELECT id, user_id, duration FROM creatives WHERE id = ANY(%s) AND {cond}", (ids, *params))
+        if len(owned) != len(ids):
+            raise HTTPException(404, "Có tệp media không tồn tại hoặc không thuộc tài khoản của bạn.")
+        if is_admin(user) and any(r["user_id"] != pl_row.get("user_id") for r in owned):
+            raise HTTPException(400, "Có media thuộc tài khoản khác với chủ playlist.")
+        durations = {r["id"]: r["duration"] for r in owned}
+    with db.pool().connection(timeout=db.DB_TIMEOUT) as conn:
+        with conn.transaction():
+            conn.execute("DELETE FROM playlist_items WHERE playlist_id = %s", (playlist_id,))
+            for pos, it in enumerate(body.items):
+                duration = it.duration if it.duration and it.duration > 0 else durations[it.creative_id]
+                conn.execute(
+                    "INSERT INTO playlist_items (playlist_id, creative_id, position, duration) VALUES (%s, %s, %s, %s)",
+                    (playlist_id, it.creative_id, pos, duration),
+                )
+    _invalidate_player_cache()
+    row = db.query_one("SELECT * FROM playlists WHERE id = %s", (playlist_id,))
+    return _to_playlist_public(row, load_items=True)
+
+
+@router.post("/{playlist_id}/items", response_model=PlaylistPublic)
+def add_item_to_playlist(playlist_id: int, body: PlaylistItemAdd, user: User) -> PlaylistPublic:
+    """Add a media creative from the Media Library into this playlist."""
+    pl_row = _owned(playlist_id, user)
+    cr_row = fetch_owned("creatives", body.creative_id, user, "Không tìm thấy tệp media trong kho")
+    # A non-admin only ever reaches their own media above. An admin may reach
+    # anyone's, but a playlist still only plays its owner's adverts.
+    if is_admin(user) and cr_row.get("user_id") != pl_row.get("user_id"):
+        raise HTTPException(400, "Media này thuộc tài khoản khác với chủ playlist.")
 
     duration = body.duration if body.duration is not None and body.duration > 0 else cr_row["duration"]
 
@@ -335,11 +425,9 @@ def add_item_to_playlist(playlist_id: int, body: PlaylistItemAdd) -> PlaylistPub
 
 
 @router.delete("/{playlist_id}/items/{item_id}", response_model=PlaylistPublic)
-def remove_item_from_playlist(playlist_id: int, item_id: int) -> PlaylistPublic:
+def remove_item_from_playlist(playlist_id: int, item_id: int, user: User) -> PlaylistPublic:
     """Remove a media creative from this playlist (file stays safe in Kho Media)."""
-    pl_row = db.query_one("SELECT * FROM playlists WHERE id = %s", (playlist_id,))
-    if not pl_row:
-        raise HTTPException(404, "Không tìm thấy playlist")
+    pl_row = _owned(playlist_id, user)
 
     db.execute("DELETE FROM playlist_items WHERE id = %s AND playlist_id = %s", (item_id, playlist_id))
     _invalidate_player_cache()
@@ -359,11 +447,9 @@ def remove_item_from_playlist(playlist_id: int, item_id: int) -> PlaylistPublic:
 
 
 @router.put("/{playlist_id}/items/order", response_model=PlaylistPublic)
-def reorder_playlist_items(playlist_id: int, order: PlaylistItemOrder) -> PlaylistPublic:
+def reorder_playlist_items(playlist_id: int, order: PlaylistItemOrder, user: User) -> PlaylistPublic:
     """Reorder items inside this playlist."""
-    pl_row = db.query_one("SELECT * FROM playlists WHERE id = %s", (playlist_id,))
-    if not pl_row:
-        raise HTTPException(404, "Không tìm thấy playlist")
+    pl_row = _owned(playlist_id, user)
 
     for position, item_id in enumerate(order.item_ids):
         db.execute(
@@ -376,11 +462,9 @@ def reorder_playlist_items(playlist_id: int, order: PlaylistItemOrder) -> Playli
 
 
 @router.patch("/{playlist_id}/items/{item_id}", response_model=PlaylistPublic)
-def update_playlist_item(playlist_id: int, item_id: int, duration: float) -> PlaylistPublic:
+def update_playlist_item(playlist_id: int, item_id: int, duration: float, user: User) -> PlaylistPublic:
     """Update duration of an item inside this playlist."""
-    pl_row = db.query_one("SELECT * FROM playlists WHERE id = %s", (playlist_id,))
-    if not pl_row:
-        raise HTTPException(404, "Không tìm thấy playlist")
+    pl_row = _owned(playlist_id, user)
 
     if duration > 0:
         db.execute(
@@ -407,11 +491,10 @@ async def upload_to_playlist(
     category: str = Form("Chung"),
     description: str = Form(""),
     duration: float | None = Form(None),
+    user: User = None,
 ) -> PlaylistPublic:
     """Upload media file and automatically attach it to this playlist."""
-    pl_row = db.query_one("SELECT * FROM playlists WHERE id = %s", (playlist_id,))
-    if not pl_row:
-        raise HTTPException(404, "Không tìm thấy playlist")
+    pl_row = _owned(playlist_id, user)
 
     suffix = Path(file.filename or "").suffix.lower()
     if suffix in IMAGE_EXT:
@@ -441,8 +524,8 @@ async def upload_to_playlist(
         """INSERT INTO creatives (name, filename, kind, duration, position, enabled, created_at,
                                   target_age_group, target_gender, target_crowd, target_weather,
                                   target_pet, target_clothing, target_style,
-                                  category, description)
-           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                                  category, description, user_id)
+           VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
         (
             display_name,
             stored,
@@ -461,6 +544,9 @@ async def upload_to_playlist(
             target_style,
             category,
             description,
+            # The playlist owner's, so an admin uploading into someone's
+            # playlist leaves the file in that person's library.
+            pl_row.get("user_id"),
         ),
     )
 

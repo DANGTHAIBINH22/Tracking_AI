@@ -21,6 +21,14 @@ import cv2
 
 from configs import CFG
 
+# The closed VQA prompts, shared with the warmup query: MPS compiles kernels per
+# shape, so priming with the real prompts and a real-sized frame is what makes
+# the first live pass as cheap as every later one.
+Q_WEATHER = "Is the weather sunny, cloudy, or rainy? Answer in one word."
+Q_ACTIVITY = "Are people standing, walking, or shopping? Answer in one word."
+Q_OBJECTS = "Is there a bag, laptop, or food? Answer in one word or none."
+VLM_LONG_SIDE = 480  # submit_frame downscales to this
+
 @dataclass
 class SceneContext:
     """Latest ambient context. All fields None/empty until a VQA pass has run.
@@ -74,20 +82,45 @@ class SceneVLM:
 
                 print(f"[VLM] Khởi tạo trước Moondream VLM trên thiết bị {device} (Server Warmup)...")
                 model_id = CFG.vlm_model_id if hasattr(CFG, "vlm_model_id") else "vikhyatk/moondream2"
-                cls._shared_tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+                tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
                 # MPS on Apple Silicon does not support BFloat16; enforce float32
                 torch_dtype = torch.float16 if device == "cuda" else torch.float32
-                cls._shared_model = AutoModelForCausalLM.from_pretrained(
+                model = AutoModelForCausalLM.from_pretrained(
                     model_id,
                     trust_remote_code=True,
                     torch_dtype=torch_dtype,
                 ).to(device)
+                # Run one query now. The first inference on MPS compiles its
+                # kernels and holds the GPU for ~25s; done lazily, that landed
+                # in the middle of a capture and froze YOLO with it (measured:
+                # 42 -> 12 FPS average, single frames of 8s and 25s). The model
+                # is published only after this, so no capture can reach it cold.
+                cls._prime(model)
+                cls._shared_tokenizer = tokenizer
+                cls._shared_model = model
                 cls._shared_device = device
                 print("[VLM] Đã nạp sẵn Moondream VLM vào bộ nhớ thành công (Sẵn sàng phục vụ tức thì).")
                 return True
             except Exception as e:
                 print(f"[VLM] Lỗi khi nạp trước Moondream VLM ({e}). Sẽ thử lại khi chạy.")
                 return False
+
+    @staticmethod
+    def _prime(model) -> None:
+        """One throwaway query, to pay the first-run compile cost up front."""
+        import numpy as np
+        import torch
+        from PIL import Image
+        t0 = time.time()
+        try:
+            with torch.inference_mode():
+                frame = np.zeros((VLM_LONG_SIDE * 9 // 16, VLM_LONG_SIDE, 3), np.uint8)
+                enc = model.encode_image(Image.fromarray(frame))
+                for q in (Q_WEATHER, Q_ACTIVITY, Q_OBJECTS):
+                    model.query(enc, q, settings={"temperature": 0.0, "max_tokens": 16})
+            print(f"[VLM] Đã chạy thử Moondream để biên dịch kernel ({time.time() - t0:.1f}s).")
+        except Exception as e:  # a failed prime only means the first real query is slow
+            print(f"[VLM] Chạy thử Moondream lỗi ({e}); lần suy luận đầu sẽ chậm.")
 
     def __init__(self, period_seconds: float = CFG.vlm_period_seconds):
         self.period_seconds = period_seconds
@@ -140,7 +173,7 @@ class SceneVLM:
                 return  # the worker still owes us a pass on the last one
 
         h, w = frame_bgr.shape[:2]
-        scale = 480 / max(h, w)
+        scale = VLM_LONG_SIDE / max(h, w)
         if scale < 1.0:
             small = cv2.resize(frame_bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
         else:
@@ -245,9 +278,9 @@ class SceneVLM:
                     except Exception:
                         return ""
 
-                ans_weather = _ask("Is the weather sunny, cloudy, or rainy? Answer in one word.")
-                ans_activity = _ask("Are people standing, walking, or shopping? Answer in one word.")
-                ans_objects = _ask("Is there a bag, laptop, or food? Answer in one word or none.")
+                ans_weather = _ask(Q_WEATHER)
+                ans_activity = _ask(Q_ACTIVITY)
+                ans_objects = _ask(Q_OBJECTS)
 
             # Normalization and keyword mapping for CARE Engine scoring
             weather = "sunny"

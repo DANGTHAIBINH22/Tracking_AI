@@ -17,6 +17,12 @@ import threading
 import time
 
 from server import db
+from server.audience import NEUTRAL_SCORE
+
+# Smart-targeting decisions, on the engine's 0-100 scale where NEUTRAL_SCORE is
+# an untargeted advert and NEUTRAL_SCORE + 10 means 60% of the room fits.
+MIN_EDGE = 10.0        # below this lead over neutral, play the normal rotation
+TIE_BAND = 5.0         # adverts this close to the best take turns
 
 
 class PlaylistPlayer:
@@ -34,7 +40,9 @@ class PlaylistPlayer:
         # The engine's creatives ranked for the current audience, and when it
         # last said so. Consulted at natural boundaries; see `_fresh_preference`.
         self._ranking: list[int] = []
+        self._ranking_scores: dict[int, float] = {}
         self._ranked_at: float = 0.0
+        self._audience_since: float = 0.0   # when the current audience was first ranked
         self._cached_playlist: list[dict] = []
         self._cached_playlist_time: float = 0.0
         self._playlist_cache_ttl: float = 5.0  # seconds caching to prevent DB bottleneck
@@ -43,9 +51,12 @@ class PlaylistPlayer:
 
         # Dynamic Cut-in & Lookahead Pre-Decision settings
         self._cut_in_enabled: bool = True
-        self._cut_in_min_playback: float = 3.0   # minimum seconds played before cut-in allowed
+        # Off = "phát hết video": every advert plays to its end. On = cut to the
+        # audience's advert this many seconds after they appear (UI: fixed 5s).
+        self._cut_in_min_playback: float = 5.0
         self._lookahead_seconds: float = 3.0     # seconds before end of ad to pre-lock next ad
         self._precomputed_ranking: list[int] = []
+        self._precomputed_scores: dict[int, float] = {}
         self._precomputed_context: dict | None = None
         self._precomputed_time: float = 0.0
 
@@ -112,6 +123,7 @@ class PlaylistPlayer:
             if not enabled:
                 self._target_requested_id = None
                 self._ranking = []
+                self._ranking_scores = {}
         db.execute(
             "INSERT INTO app_state (key, value) VALUES ('smart_targeting', %s) "
             "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
@@ -165,7 +177,12 @@ class PlaylistPlayer:
                 )
             return self.get_targeting_settings()
 
-    def set_audience_ranking(self, ranked_ids: list[int], context_info: dict | None = None) -> None:
+    def set_audience_ranking(
+        self,
+        ranked_ids: list[int],
+        context_info: dict | None = None,
+        scores: dict[int, float] | None = None,
+    ) -> None:
         """Take the engine's creatives ordered best-match-first for who is watching.
 
         Evaluates Dynamic Cut-in if eligible, or pre-computes the next creative
@@ -177,7 +194,11 @@ class PlaylistPlayer:
             if not self._smart_targeting or not self._playing:
                 return
             now = time.time()
+            # A ranking after a gap is a new audience: the cut-in wait starts here.
+            if now - self._ranked_at > 3.0:
+                self._audience_since = now
             self._ranking = list(ranked_ids)
+            self._ranking_scores = dict(scores or {})
             self._ranked_at = now
             if context_info:
                 self._latest_context_info = context_info
@@ -191,50 +212,108 @@ class PlaylistPlayer:
                 # Pre-lock next creative if within the Lookahead Pre-decision Window
                 if remaining <= (self._lookahead_seconds + 0.5):
                     self._precomputed_ranking = list(ranked_ids)
+                    self._precomputed_scores = dict(scores or {})
                     self._precomputed_context = dict(context_info) if context_info else None
                     self._precomputed_time = now
 
-                # Evaluate Dynamic Cut-in (interrupting mid-airing if urgent)
-                if self._cut_in_enabled and elapsed >= self._cut_in_min_playback and remaining > 1.5:
-                    top_id = ranked_ids[0]
+                # Cut-in: once the audience has been in front of the screen for
+                # `cut_in_min_playback` seconds, switch to the advert CARE picks
+                # for it — unless what is on screen already fits as well. The
+                # wait counts from whichever is later, the audience arriving or
+                # this advert starting, so nobody sees a clip cut in its first
+                # seconds. A room with no clear majority gets no pick, hence no
+                # cut; a pet advert in front of a pet owner scores high enough
+                # on its own, so it needs no special case.
+                waited = now - max(self._audience_since, self._started_at)
+                if self._cut_in_enabled and waited >= self._cut_in_min_playback and remaining > 1.5:
                     curr_id = self._creative.get("id")
-                    if top_id != curr_id:
-                        has_pet = False
-                        if context_info:
-                            summ = (context_info.get("audience_summary") or "").lower()
-                            reas = (context_info.get("reason") or "").lower()
-                            has_pet = (
-                                "thú cưng" in summ
-                                or "chó" in summ
-                                or "mèo" in summ
-                                or "pet" in summ
-                                or "thú cưng" in reas
-                            )
-
-                        tag_pet = (self._creative.get("target_pet") or "all").lower()
-                        is_curr_pet = tag_pet in ("yes", "pet", "dog", "cat")
-                        match_score = float(context_info.get("match_score") or 0.0) if context_info else 0.0
-
-                        trigger = False
-                        trigger_reason = ""
-                        if has_pet and not is_curr_pet:
-                            trigger = True
-                            trigger_reason = "Khán giả dắt Thú cưng khi đang chiếu clip thông thường"
-                        elif match_score >= 80.0:
-                            trigger = True
-                            trigger_reason = f"Độ tương thích mục tiêu vượt trội ({match_score}%)"
-
-                        if trigger:
+                    scores = self._ranking_scores
+                    pick = self._pick_ranked([{"id": i} for i in ranked_ids], ranked_ids, scores, exclude_id=curr_id)
+                    if pick is not None:
+                        best = max(scores.values(), default=NEUTRAL_SCORE)
+                        current = scores.get(curr_id, NEUTRAL_SCORE)
+                        if current < best - TIE_BAND:
+                            target = pick["id"]
                             now_dt = datetime.datetime.now().strftime("%H:%M:%S")
                             print("\n" + "=" * 76)
-                            print(f"⚡ [DYNAMIC CUT-IN] CẮT NGANG THÔNG MINH ĐỂ ĐỔI QUẢNG CÁO ƯU TIÊN")
+                            print("⚡ [CUT-IN] NGẮT ĐỂ PHÁT QUẢNG CÁO HỢP KHÁN GIẢ")
                             print(f"⏱️  Thời gian: {now_dt} (clip đã phát {elapsed:.1f}s / {duration:.1f}s)")
-                            print(f"📺  Clip đang chiếu: \"{self._creative.get('name')}\" (ID #{curr_id})")
-                            print(f"🎯  Cắt sang Clip: \"{context_info.get('target_creative_name', top_id)}\"")
-                            print(f"🐾  Lý do ngắt: {trigger_reason}")
+                            print(f"📺  Đang chiếu: \"{self._creative.get('name')}\" (#{curr_id}, phù hợp {current:.0f}/100)")
+                            print(f"🎯  Chuyển sang: #{target} (phù hợp {scores.get(target, 0):.0f}/100)")
                             print("=" * 76 + "\n", flush=True)
-                            self._target_requested_id = top_id
-                            self._stop.set()  # Wake the loop sleep immediately
+                            self._target_requested_id = target
+                            self._stop.set()  # wake the loop's sleep at once
+
+    def _pick_ranked(
+        self,
+        items: list[dict],
+        ranking: list[int],
+        scores: dict[int, float],
+        exclude_id: int | None,
+    ) -> dict | None:
+        """The advert to play for this audience, or None for plain rotation.
+
+        None unless some advert fits the room clearly better than an untargeted
+        one: adverts with no target, or a room with no clear majority, belong to
+        the normal rotation, not to whichever id sorted first. Among adverts
+        that score within TIE_BAND of the best, the one played least recently
+        wins — otherwise a crowd that stays put sees the same two adverts
+        alternate for as long as it stands there.
+        """
+        by_id = {item["id"]: item for item in items}
+        ranked = [(cid, scores.get(cid, NEUTRAL_SCORE)) for cid in ranking if cid != exclude_id and cid in by_id]
+        if not ranked:
+            return None
+        best = max(score for _, score in ranked)
+        if best < NEUTRAL_SCORE + MIN_EDGE:
+            return None
+        pool = [cid for cid, score in ranked if score >= best - TIE_BAND]
+        pick = min(pool, key=lambda cid: (self._last_played_times.get(cid, 0.0), -scores.get(cid, 0.0)))
+        return by_id[pick]
+
+    def _rotation_pick(self, items: list[dict], previous_id: int | None) -> dict:
+        """Fair rotation: the least recently played item, never the one just
+        shown (unless it is the only one). Never-played items come first; ties
+        keep playlist order."""
+        candidates = [c for c in items if c["id"] != previous_id] if len(items) > 1 else items
+        return min(candidates, key=lambda c: (self._last_played_times.get(c["id"], 0.0), items.index(c)))
+
+    def peek_next(self) -> dict | None:
+        """What the loop would put on screen at the next cut, without taking it.
+
+        Mirrors `_loop`'s order — a requested cut-in, then a fresh audience pick
+        (the pre-locked one if the lookahead window has fired), then rotation —
+        so the operator's "next up" is the advert that will actually air.
+        Returns {"creative", "mode": "cut_in" | "smart" | "rotation", "score"}.
+        """
+        items = self.playlist()
+        if not items:
+            return None
+        with self._lock:
+            by_id = {c["id"]: c for c in items}
+            current = self._creative.get("id") if self._creative else None
+            if self._target_requested_id in by_id:
+                cid = self._target_requested_id
+                return {"creative": by_id[cid], "mode": "cut_in", "score": self._ranking_scores.get(cid)}
+            if self._smart_targeting:
+                fresh_lock = self._precomputed_ranking and time.time() - self._precomputed_time <= self._lookahead_seconds + 3.0
+                ranking, scores = (
+                    (self._precomputed_ranking, self._precomputed_scores) if fresh_lock
+                    else (self._ranking, self._ranking_scores) if time.time() - self._ranked_at <= 3.0
+                    else ([], {})
+                )
+                pick = self._pick_ranked(items, ranking, scores, current) if ranking else None
+                if pick is not None:
+                    return {"creative": pick, "mode": "smart", "score": scores.get(pick["id"])}
+            return {"creative": self._rotation_pick(items, current), "mode": "rotation", "score": None}
+
+    def current_fit(self) -> float | None:
+        """How well the advert on screen fits the audience right now (0..100),
+        or None with no fresh audience ranking."""
+        with self._lock:
+            if not self._creative or not self._smart_targeting or time.time() - self._ranked_at > 3.0:
+                return None
+            return self._ranking_scores.get(self._creative.get("id"))
 
     def _fresh_preference(self, items: list[dict], exclude_id: int | None) -> dict | None:
         """Best match for the current audience, skipping the advert just shown.
@@ -248,11 +327,7 @@ class PlaylistPlayer:
             return None
         if time.time() - self._ranked_at > 3.0:
             return None
-        by_id = {item["id"]: item for item in items}
-        for creative_id in self._ranking:
-            if creative_id != exclude_id and creative_id in by_id:
-                return by_id[creative_id]
-        return None
+        return self._pick_ranked(items, self._ranking, self._ranking_scores, exclude_id)
 
     # ---------- playlist ----------
 
@@ -364,8 +439,8 @@ class PlaylistPlayer:
         """
         now = time.time()
         airing_id = db.insert(
-            "INSERT INTO airings (creative_id, started_at) VALUES (%s, %s) RETURNING id",
-            (creative["id"], now),
+            "INSERT INTO airings (creative_id, started_at, playlist_id) VALUES (%s, %s, %s) RETURNING id",
+            (creative["id"], now, creative.get("playlist_id")),
         )
         with self._lock:
             previous = self._airing_id
@@ -461,13 +536,11 @@ class PlaylistPlayer:
                         and self._precomputed_ranking
                         and (time.time() - self._precomputed_time) <= (self._lookahead_seconds + 3.0)
                     ):
-                        by_id = {item["id"]: item for item in items}
-                        for cid in self._precomputed_ranking:
-                            if cid != previous_id and cid in by_id:
-                                targeted = by_id[cid]
-                                if self._precomputed_context:
-                                    self._latest_context_info = dict(self._precomputed_context)
-                                break
+                        targeted = self._pick_ranked(
+                            items, self._precomputed_ranking, self._precomputed_scores, previous_id
+                        )
+                        if targeted is not None and self._precomputed_context:
+                            self._latest_context_info = dict(self._precomputed_context)
                         self._precomputed_ranking = []
 
                     # 2. Fall back to fresh preference if lookahead had none
@@ -484,18 +557,7 @@ class PlaylistPlayer:
                         self._index = items.index(targeted)
                 else:
                     previous_id = self._creative.get("id") if self._creative else None
-                    # Fair Rotation: Sort playlist items by last_played_time ascending (Least Recently Played).
-                    # Items never played have timestamp 0.0, so they come first.
-                    # Ties (e.g. at startup) preserve their original playlist order.
-                    candidates = [c for c in items if c["id"] != previous_id] if len(items) > 1 else items
-                    candidates_sorted = sorted(
-                        candidates,
-                        key=lambda c: (
-                            self._last_played_times.get(c["id"], 0.0),
-                            items.index(c)
-                        )
-                    )
-                    creative = candidates_sorted[0]
+                    creative = self._rotation_pick(items, previous_id)
                     self._index = items.index(creative)
                     is_targeted = False
 
@@ -509,11 +571,18 @@ class PlaylistPlayer:
 
             if is_targeted and self._latest_context_info:
                 ctx = self._latest_context_info
+                # Score and reason of the advert actually chosen. The engine's
+                # context describes its own top pick, but adverts within
+                # TIE_BAND take turns, so that pick is often not this one — the
+                # log used to explain a football clip with the gym clip's reason.
+                cid = creative["id"]
+                score = self._ranking_scores.get(cid, self._precomputed_scores.get(cid, ctx.get("match_score")))
+                score = round(float(score), 1) if score is not None else None
                 ad_entry.update({
                     "mode": "smart_targeting",
-                    "match_score": ctx.get("match_score"),
+                    "match_score": score,
                     "audience_summary": ctx.get("audience_summary"),
-                    "reason": ctx.get("reason"),
+                    "reason": f"{ctx.get('audience_summary', '')} → {creative.get('category') or 'Chung'}: phù hợp {score}/100",
                 })
                 print("\n" + "=" * 76)
                 print(f"🎯 [AI SMART TARGETING] ĐÃ ĐỔI QUẢNG CÁO PHÙ HỢP KHÁN GIẢ")
@@ -522,8 +591,8 @@ class PlaylistPlayer:
                 print(f"👀  Khán giả tracking: {ctx.get('audience_summary', 'N/A')}")
                 if ctx.get("scene_weather"):
                     print(f"☀️  Bối cảnh môi trường: {ctx.get('scene_weather')}")
-                print(f"📊  Độ tương thích mục tiêu: {ctx.get('match_score')}%")
-                print(f"📋  Lý do AI chọn: {ctx.get('reason', 'N/A')}")
+                print(f"📊  Độ tương thích mục tiêu: {ad_entry['match_score']}/100")
+                print(f"📋  Lý do AI chọn: {ad_entry['reason']}")
                 print("=" * 76 + "\n", flush=True)
             else:
                 ad_entry.update({

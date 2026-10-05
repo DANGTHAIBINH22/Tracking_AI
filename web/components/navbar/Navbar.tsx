@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { usePathname } from "next/navigation";
 import { NavBrand } from "./NavBrand";
 import { NavLinks } from "./NavLinks";
@@ -14,16 +14,18 @@ export function Navbar() {
   const [showScreenModal, setShowScreenModal] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  // Close mobile drawer on route change
-  useEffect(() => {
+  // Close mobile drawer on route change. Adjusted during render rather than
+  // in an effect, so the stale open drawer is never painted on the new page.
+  const [menuPath, setMenuPath] = useState(pathname);
+  if (menuPath !== pathname) {
+    setMenuPath(pathname);
     setMobileMenuOpen(false);
-  }, [pathname]);
+  }
 
   // Exclude fullscreen playback / dedicated CMS editor pages
   if (
     pathname?.startsWith("/playlists") ||
     pathname === "/homescreen" ||
-    pathname === "/screen" ||
     pathname === "/player"
   ) {
     return null;

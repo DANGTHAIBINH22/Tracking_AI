@@ -18,22 +18,46 @@ dwell time and unique count the dashboard reports.
 from __future__ import annotations
 
 import asyncio
+import re
 from concurrent.futures import ThreadPoolExecutor
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
 
 from configs import CFG
+from pet_tracker import ANIMAL_VI
 from pipeline import Pipeline, PersonMeta
 from server import db
-from server.audience import AGE_GROUPS, normalize_age_group, target_covers
+from server.audience import AGE_GROUPS, NEUTRAL_SCORE, Viewer, coverage, majority, normalize_age_group, parse_tags, viewer_weight
 from server.player import PlaylistPlayer
 from server.settings import SETTINGS
 from server.sources import BROWSER_SOURCE, BrowserSource, LocalCameraSource, PlaylistSource, is_browser_source
 from viz import draw_tracking_hud
+
+# Words in an advert's category/description that mark it as a pet advert when
+# its `target_pet` tag was left at "all". Only the animals a shopper walks in
+# with: the full ANIMAL_VI vocabulary used to be in here, so "thịt bò" (beef)
+# and "gấu bông" (teddy bear) were scored as pet adverts and lost 30 points in
+# front of every viewer without a pet.
+_PET_AD_WORDS = ("thú cưng", "pet", "pets", "chó", "mèo", "cún")
+
+
+def _mentions(text: str, words: tuple[str, ...]) -> bool:
+    """Whole-word match. `k in text` matched inside other words — "pet" in
+    "carpet", "xe" in "xem" — and quietly moved scores on adverts that had
+    nothing to do with the keyword."""
+    return any(re.search(rf"(?<!\w){re.escape(w)}(?!\w)", text) for w in words)
+
+
+# The audience an advert is matched against is pooled over this many seconds
+# rather than read off one frame: a recommendation runs about once a second,
+# and one misread face or one person stepping out of frame must not flip the
+# majority — and with it the next advert — back and forth.
+_AUDIENCE_WINDOW_S = 4.0
 
 # How many per-person rows one session may carry in `tracks_json`. A busy
 # hour is a few hundred; the cap only stops a runaway source turning one
@@ -84,7 +108,11 @@ class AnalyticsEngine:
             max_bytes=SETTINGS.ingest_max_frame_bytes,
         )
 
-        self._pipeline: Pipeline | None = None
+        self._pipeline: Pipeline | None = None   # the one the running loop is feeding
+        # Built and warmed once, then reused by every run: loading the models on
+        # each start froze the first seconds of every capture. See preload().
+        self._warm_pipeline: Pipeline | None = None
+        self._warm_lock = threading.Lock()
         self._states: dict[int, _TrackState] = {}
         self._unique_ids: set[int] = set()
         self._latest_metas: list[PersonMeta] = []
@@ -100,6 +128,8 @@ class AnalyticsEngine:
         self._active_source: object | None = None
         self._latest_recommendation: dict | None = None
         self._last_rec_computed_time: float = 0.0
+        # (timestamp, everyone present) for the last _AUDIENCE_WINDOW_S seconds.
+        self._audience_window: deque[tuple[float, list[Viewer]]] = deque()
         self._db_executor: ThreadPoolExecutor | None = None
 
         # Session tracking per device
@@ -124,6 +154,7 @@ class AnalyticsEngine:
         device_id: str | None = None,
         screen_id: int | None = None,
         notes: str = "",
+        user_id: int | None = None,
     ) -> None:
         with self._lock:
             if self._running:
@@ -151,10 +182,17 @@ class AnalyticsEngine:
             self._current_session_code = f"SES-{date_prefix}-{rand_suffix}"
             try:
                 row = db.query_one(
+                    # Owner: the screen's account when a screen is capturing,
+                    # else whoever pressed start. Neither known (a browser
+                    # ingest with no screen): NULL, which init_db hands to the
+                    # primary admin.
                     """INSERT INTO tracking_sessions
-                       (session_code, device_id, screen_id, source, started_at, status, notes)
-                       VALUES (%s, %s, %s, %s, %s, 'active', %s) RETURNING id""",
-                    (self._current_session_code, self._session_device_id, self._session_screen_id, self._source, now, notes),
+                       (session_code, device_id, screen_id, source, started_at, status, notes, user_id)
+                       VALUES (%s, %s, %s, %s, %s, 'active', %s,
+                               COALESCE((SELECT user_id FROM screens WHERE id = %s), %s))
+                       RETURNING id""",
+                    (self._current_session_code, self._session_device_id, self._session_screen_id, self._source, now, notes,
+                     self._session_screen_id, user_id),
                 )
                 self._current_session_id = row["id"] if row else None
             except Exception as e:
@@ -168,9 +206,27 @@ class AnalyticsEngine:
                 self._frame_cond.notify_all()
             self._latest_metas = []
             self._latest_recommendation = None
+            self._audience_window.clear()
 
             self._thread = threading.Thread(target=self._loop, daemon=True, name="analytics")
             self._thread.start()
+
+    def preload(self) -> Pipeline:
+        """Build and warm the Pipeline, once for the life of the server.
+
+        Called from a background thread at startup so the models are in memory
+        and past their slow first inference before anyone presses start. If a
+        capture starts first, its loop simply waits here for the warm-up to
+        finish instead of stuttering through it on live frames.
+        """
+        with self._warm_lock:
+            if self._warm_pipeline is None:
+                t0 = time.perf_counter()
+                pipeline = Pipeline()
+                pipeline.warmup()
+                self._warm_pipeline = pipeline
+                print(f"[Engine] Pipeline đã nạp và chạy thử xong ({time.perf_counter() - t0:.1f}s).")
+            return self._warm_pipeline
 
     def stop(self) -> None:
         with self._lock:
@@ -312,7 +368,10 @@ class AnalyticsEngine:
         if not metas:
             return None
 
+        now = time.time()
         people_count = len(metas)
+        # Crowd size is described, never matched against a tag: how many people
+        # are present already shapes the score through `coverage` below.
         if people_count == 1:
             crowd_context = "single"
             crowd_str = "1 khán giả"
@@ -323,18 +382,34 @@ class AnalyticsEngine:
             crowd_context = "crowd"
             crowd_str = f"Đám đông {people_count} người"
 
-        # Prioritize attentive viewers, then longest dwell time
+        # Everyone present, each weighted by how much of a viewer they are, pooled
+        # over the last few seconds. The pipeline's bin labels ("0-6", "55+") are
+        # translated to the spelling adverts are stored in ("<6", ">55").
+        self._audience_window.append((
+            now,
+            [
+                (
+                    viewer_weight(bool(getattr(m, "attention", 0)), getattr(m, "dwell_time", 0.0)),
+                    normalize_age_group(getattr(m, "age_group", None)),
+                    getattr(m, "gender", None),
+                )
+                for m in metas
+            ],
+        ))
+        while self._audience_window and now - self._audience_window[0][0] > _AUDIENCE_WINDOW_S:
+            self._audience_window.popleft()
+        audience: list[Viewer] = [v for _, people in self._audience_window for v in people]
+        mix = majority(audience)
+        # Deliberately not gated on attention: people standing in front of the
+        # screen often talk to each other rather than face the camera, and
+        # requiring a frontal look switched targeting off for exactly them
+        # (tried against eval/eval_smart_player.py: 10/13 -> 6/13).
+
+        # Pets and clothing are read off one person — the attentive one who has
+        # stayed longest — because they describe a person, not a share.
         attentive = [m for m in metas if getattr(m, "attention", 0)]
         candidates = attentive if attentive else metas
         priority_viewer = max(candidates, key=lambda m: getattr(m, "dwell_time", 0.0))
-
-        # Translate the pipeline's bin label ("0-6", "55+") into the spelling
-        # an advert's target is stored in ("<6", ">55"). Comparing them raw
-        # inverted the score at both ends: an advert aimed at children was
-        # penalised whenever a child was the one watching.
-        v_age_grp = normalize_age_group(priority_viewer.age_group)
-        v_gender = priority_viewer.gender
-        v_age = getattr(priority_viewer, "age", None)
 
         # Score over exactly what the player can put on screen — the active
         # playlist. Querying `creatives WHERE enabled` instead silently returned
@@ -373,49 +448,26 @@ class AnalyticsEngine:
         scored: list[tuple[float, int]] = []
 
         for c in creatives:
-            score = 20.0
-            tag_age = c.get("target_age_group") or "all"
-            tag_gen = c.get("target_gender") or "all"
-            tag_crowd = c.get("target_crowd") or "all"
-            tag_weather = c.get("target_weather") or "all"
+            # Audience fit: the share of the people in front of the screen this
+            # advert is aimed at, centred on NEUTRAL_SCORE. An advert with no
+            # age or gender target, or one whose targets nobody present has been
+            # read on, sits exactly at neutral — it plays in normal rotation and
+            # only loses its turn to an advert the majority actually fits. A
+            # 50/50 room is neutral too, so a split audience gets the general
+            # rotation rather than whichever half happened to stand closer.
+            fit = coverage(audience, c.get("target_age_group"), c.get("target_gender"))
+            score = NEUTRAL_SCORE if fit is None else NEUTRAL_SCORE + (fit - 0.5) * 100.0
+            # Every target may hold several values ("sunny,cloudy"); "all", or
+            # nothing, means no preference. Compared as lower-case sets.
+            def tags(field: str) -> set[str]:
+                vals = {t.lower() for t in parse_tags(c.get(field))}
+                return set() if not vals or "all" in vals else vals
 
-            # Crowd context scoring (Bối cảnh số lượng người)
-            if tag_crowd == crowd_context:
-                score += 35.0
-            elif tag_crowd == "all":
-                score += 15.0
-            else:
-                score -= 15.0
+            tag_weather = tags("target_weather")
 
-            # Age score
-            if v_age_grp:
-                # target_covers, not ==: an advert saved before `<18` was split
-                # into `<6` / `6-13` / `13-18` still targets all three, and an
-                # equality test would penalise it in front of its own audience.
-                if target_covers(tag_age, v_age_grp):
-                    score += 30.0
-                elif tag_age == "all":
-                    score += 10.0
-                else:
-                    score -= 10.0
-
-            # Gender score
-            if v_gender:
-                if tag_gen == v_gender:
-                    score += 25.0
-                elif tag_gen == "all":
-                    score += 10.0
-                else:
-                    score -= 10.0
-
-            # Weather score (Bối cảnh thời tiết, từ VLM)
-            if scene_weather:
-                if tag_weather == scene_weather:
-                    score += 20.0
-                elif tag_weather == "all":
-                    score += 5.0
-                else:
-                    score -= 10.0
+            # Weather (from the VLM). "all" stays neutral like everything else.
+            if scene_weather and tag_weather:
+                score += 15.0 if scene_weather in tag_weather else -15.0
 
             # Ambient-object score: keyword match between what the VLM saw
             # (shopping bags, laptops, food/beverage, ...) and this creative's
@@ -436,16 +488,16 @@ class AnalyticsEngine:
                     score += 10.0
 
             # Pet score (Thú cưng đi cùng)
-            tag_pet = (c.get("target_pet") or "all").lower()
+            tag_pet = tags("target_pet")
             cat_desc_pet = f"{c.get('category') or ''} {c.get('description') or ''}".lower()
-            is_pet_ad = tag_pet in ("yes", "pet", "dog", "cat") or any(
-                k in cat_desc_pet for k in ("thú cưng", "pet", "chó", "mèo", "pate")
+            is_pet_ad = bool(tag_pet & {"yes", "pet", *ANIMAL_VI}) or (
+                "none" not in tag_pet and _mentions(cat_desc_pet, _PET_AD_WORDS)
             )
 
             if is_pet_ad:
                 if has_any_pet:
                     # Khán giả có thú cưng -> Ưu tiên rất cao!
-                    if tag_pet == effective_pet_type:
+                    if effective_pet_type in tag_pet:
                         score += 45.0  # Khớp chính xác loại pet (ví dụ chó gặp quảng cáo chó)
                     else:
                         score += 40.0  # Có pet nói chung
@@ -455,33 +507,33 @@ class AnalyticsEngine:
                     if getattr(CFG, "pet_enabled", False):
                         score -= 30.0
             else:
-                if tag_pet == "none":
+                if "none" in tag_pet:
                     if not has_any_pet:
                         score += 10.0
                     else:
                         score -= 10.0
 
             # Clothing & Style score (Trang phục và phong cách)
-            tag_clothing = (c.get("target_clothing") or "all").lower()
-            tag_style = (c.get("target_style") or "all").lower()
+            tag_clothing = tags("target_clothing")
+            tag_style = tags("target_style")
             cat_desc = f"{c.get('category') or ''} {c.get('description') or ''}".lower()
 
-            if v_clothing_style and tag_style != "all":
-                if tag_style == v_clothing_style.lower():
+            if v_clothing_style and tag_style:
+                if v_clothing_style.lower() in tag_style:
                     score += 15.0
                 else:
                     score -= 5.0
             elif v_clothing_style:
-                if v_clothing_style == "Formal" and any(k in cat_desc for k in ("công sở", "xe", "bất động sản", "tài chính", "đồng hồ", "suit")):
+                if v_clothing_style == "Formal" and _mentions(cat_desc, ("công sở", "xe", "bất động sản", "tài chính", "đồng hồ", "suit")):
                     score += 15.0
-                elif v_clothing_style == "Sport" and any(k in cat_desc for k in ("thể thao", "sport", "gym", "fitness", "năng lượng", "giày")):
+                elif v_clothing_style == "Sport" and _mentions(cat_desc, ("thể thao", "sport", "gym", "fitness", "năng lượng", "giày")):
                     score += 15.0
 
-            if v_clothing_color and tag_clothing != "all":
-                if tag_clothing == v_clothing_color.lower():
+            if v_clothing_color and tag_clothing:
+                if v_clothing_color.lower() in tag_clothing:
                     score += 10.0
 
-            score = max(10.0, min(99.0, score))
+            score = max(0.0, min(100.0, score))
             scored.append((score, c["id"]))
             if score > best_score:
                 best_score = score
@@ -490,15 +542,17 @@ class AnalyticsEngine:
         if best_c is None:
             return None
 
-        g_str = "Nam" if v_gender == "M" else "Nữ" if v_gender == "F" else "Khán giả"
-        age_str = f"~{v_age} tuổi" if v_age is not None else (v_age_grp or "")
-        att_str = "đang chú ý nhìn màn hình" if priority_viewer.attention else "đang đứng trước màn hình"
+        v_gender = mix["gender"]
+        v_age_grp = mix["age_group"]
+        g_name = {"M": "nam", "F": "nữ"}.get(v_gender or "")
+        g_str = f"{round(mix['gender_share'] * 100)}% {g_name}" if g_name else "chưa rõ giới tính"
+        age_str = f"chủ yếu {v_age_grp} tuổi" if v_age_grp else "chưa rõ độ tuổi"
         cat_str = best_c.get("category") or "Sản phẩm"
-        target_crowd_display = (
-            "mọi quy mô" if best_c.get("target_crowd") == "all"
-            else "1 người (cá nhân)" if best_c.get("target_crowd") == "single"
-            else "nhóm 2-4 người" if best_c.get("target_crowd") == "group"
-            else "đám đông ≥ 5 người"
+        targeted = coverage(audience, best_c.get("target_age_group"), best_c.get("target_gender"))
+        fit_str = (
+            f"nhắm đúng {round(targeted * 100)}% người xem"
+            if targeted is not None and best_score > NEUTRAL_SCORE
+            else "không có nhóm nào chiếm đa số rõ rệt, phát theo vòng thường"
         )
 
         weather_vi = {"sunny": "trời nắng", "cloudy": "trời nhiều mây", "rainy": "trời mưa"}.get(scene_weather)
@@ -506,7 +560,7 @@ class AnalyticsEngine:
 
         pet_str = ""
         if has_any_pet:
-            pet_kind = "chó" if effective_pet_type == "dog" else "mèo" if effective_pet_type == "cat" else "thú cưng"
+            pet_kind = ANIMAL_VI.get(effective_pet_type or "", "thú cưng")
             pet_str = f", có dắt theo {pet_kind}"
 
         clothing_str = ""
@@ -514,11 +568,11 @@ class AnalyticsEngine:
             style_clause = f" ({v_clothing_style})" if v_clothing_style else ""
             clothing_str = f", mặc áo {v_clothing_color}{style_clause}"
 
-        reason = f"{crowd_str} ({g_str} {age_str}) {att_str}{weather_clause}{pet_str}{clothing_str} — phù hợp bối cảnh {target_crowd_display} và {cat_str}."
+        reason = f"{crowd_str} ({g_str}, {age_str}){weather_clause}{pet_str}{clothing_str} — {cat_str}: {fit_str}."
 
         # Hand over the whole ranking and audience summary to the player
         if getattr(self.player, "smart_targeting", False):
-            audience_summary = f"{g_str} {age_str}{clothing_str}{pet_str}, {crowd_str}".strip(", ")
+            audience_summary = f"{crowd_str}: {g_str}, {age_str}{clothing_str}{pet_str}"
             context_summary = {
                 "target_creative_id": best_c["id"],
                 "target_creative_name": best_c["name"],
@@ -531,6 +585,7 @@ class AnalyticsEngine:
             self.player.set_audience_ranking(
                 [cid for _, cid in sorted(scored, reverse=True)],
                 context_info=context_summary,
+                scores={cid: sc for sc, cid in scored},
             )
 
         return {
@@ -541,7 +596,10 @@ class AnalyticsEngine:
             "match_score": round(best_score, 1),
             "viewer_age_group": v_age_grp,
             "viewer_gender": v_gender,
-            "viewer_approx_age": v_age,
+            # Shares of the weighted audience over the last few seconds.
+            "viewer_gender_share": round(mix["gender_share"], 2),
+            "viewer_age_share": round(mix["age_share"], 2),
+            "viewer_approx_age": getattr(priority_viewer, "age", None),
             "crowd_context": crowd_context,
             "people_count": people_count,
             "scene_weather": scene_weather,
@@ -564,6 +622,10 @@ class AnalyticsEngine:
             return {
                 "running": self._running,
                 "source": self._source,
+                # Which device the running capture belongs to ("host" or a
+                # screen id). The engine is one for the whole system, so a
+                # device page uses this to tell its own run from another's.
+                "device_id": self._session_device_id if self._running else None,
                 "mode": "browser" if is_browser_source(self._source) else "server",
                 # Only differs from `source` while a queue is running.
                 "source_now": getattr(self._active_source, "current_spec", None) or self._source,
@@ -825,8 +887,11 @@ class AnalyticsEngine:
             self._active_source = source
             from_browser = isinstance(source, BrowserSource)
 
-            self._pipeline = Pipeline()
-            self._pipeline.start()
+            # reset(): the warm instance still holds the previous run's track ids.
+            pipeline = self.preload()
+            pipeline.reset()
+            pipeline.start()
+            self._pipeline = pipeline
             frame_idx = 0
             last_tick = time.perf_counter()
             min_dt = 1.0 / SETTINGS.capture_max_fps
@@ -875,7 +940,10 @@ class AnalyticsEngine:
 
                 elapsed = max(time.perf_counter() - last_tick, 1e-6)
                 last_tick = time.perf_counter()
-                fps = 1.0 / elapsed
+                # Smoothed: 1/elapsed of a single frame swings 15 <-> 40 on
+                # ordinary jitter, which reads as instability that isn't there.
+                inst = 1.0 / elapsed
+                fps = inst if frame_idx == 0 else fps * 0.9 + inst * 0.1
 
                 self._render(prep, metas, fps)
                 with self._lock:

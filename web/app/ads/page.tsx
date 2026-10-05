@@ -1,5 +1,6 @@
 "use client";
 
+import { useRefresh } from "@/lib/useRefresh";
 import {
   Creative,
   CreativeProfileResult,
@@ -8,7 +9,8 @@ import {
   mediaUrl,
 } from "@/lib/api";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
+import { CircleAlert, Globe, Play, Radio, ScanSearch, Target, WandSparkles } from "lucide-react";
 import {
   IconClock,
   IconClose,
@@ -26,106 +28,288 @@ import {
 } from "@/components/icons/Icons";
 import { UploadMediaModal } from "@/components/UploadMediaModal";
 import { EditMediaModal } from "@/components/EditMediaModal";
-import { CustomSelect } from "@/components/CustomSelect";
-import { AGE_OPTIONS, CATEGORY_OPTIONS, CROWD_OPTIONS, GENDER_OPTIONS, WEATHER_OPTIONS, labelFor } from "@/lib/taxonomy";
+import { FieldSelect } from "@/components/FieldSelect";
+import { AnimatedBadge } from "@/components/motion/animated-badge";
+import { Drawer } from "@/components/motion/drawer";
+import { Input } from "@/components/motion/input";
+import {
+  ImageViewer,
+  ImageViewerContent,
+  ImageViewerThumbnail,
+  type ImageViewerImage,
+} from "@/components/motion/image-viewer";
+import { OverflowActions, type OverflowActionItem } from "@/components/motion/overflow-actions";
+import { Table, type TableColumn } from "@/components/motion/table";
+import { Tabs, TabsList, TabsTrigger } from "@/components/motion/tabs";
+import {
+  AGE_OPTIONS,
+  ANY,
+  CATEGORY_OPTIONS,
+  GENDER_OPTIONS,
+  PET_OPTIONS,
+  STYLE_OPTIONS,
+  WEATHER_OPTIONS,
+  tagsLabel,
+  type Option,
+} from "@/lib/taxonomy";
+import { cn } from "@/lib/utils";
 
 const SOURCE_LABELS: Record<string, string> = {
+  name: "đoán từ tên tệp",
   faces: "đo khuôn mặt trong video",
   vlm: "AI đọc nội dung",
   "faces+vlm": "đo khuôn mặt + AI đọc nội dung",
   none: "không đọc được gì",
 };
 
+/** A proposal from either AI tool. Neither writes anything: the operator sees
+ *  current → proposed and applies it, the same contract `/analyze` already had. */
+type Proposal = Pick<
+  CreativeProfileResult,
+  "category" | "target_age_group" | "target_gender" | "notes"
+> & { source: CreativeProfileResult["source"] | "name" };
 
-/** The analyser's proposal, shown for confirmation rather than applied. */
-function ProfilePanel({
-  profile,
+type KindFilter = "all" | "video" | "image" | "web";
+type StatusFilter = "all" | "on-air" | "untargeted";
+
+/** The smart scorer (server/audience.coverage) matches age and gender against
+ *  the people in front of the screen. An advert with both at "all" sits at the
+ *  neutral score: it plays in normal rotation and is never prioritised. */
+function isUntargeted(c: Creative) {
+  return (c.target_age_group || ANY) === ANY && (c.target_gender || ANY) === ANY;
+}
+
+function formatDuration(sec: number) {
+  if (sec < 60) return `${Number(sec.toFixed(1))}s`;
+  const whole = Math.round(sec);
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+}
+
+function formatTotal(sec: number) {
+  const s = Math.round(sec);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  const rem = s % 60;
+  return `${m}p ${rem > 0 ? `${rem}s` : ""}`.trim();
+}
+
+/** Short chip text, without the long parenthetical; several values joined. */
+function shortLabel(options: Option[], value: string) {
+  return tagsLabel(options, value);
+}
+
+// ───────────────────────────── small pieces ─────────────────────────────
+
+function Thumb({ item, className }: { item: Creative; className?: string }) {
+  if (item.kind === "image") {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img src={mediaUrl(item.url)} alt={item.name} className={cn("h-full w-full object-contain", className)} />
+    );
+  }
+  if (item.kind === "video") {
+    // `#t=` plus metadata preload makes the browser paint a real frame; a bare
+    // <video> paints black until it is played, which is every card here.
+    return (
+      <video
+        src={`${mediaUrl(item.url)}#t=0.5`}
+        muted
+        playsInline
+        preload="metadata"
+        className={cn("h-full w-full object-contain", className)}
+      />
+    );
+  }
+  let host = item.url;
+  try {
+    host = new URL(item.url).host;
+  } catch {
+    // a relative or malformed URL: show it as stored
+  }
+  return (
+    <div className="flex h-full w-full flex-col items-center justify-center gap-1 text-slate-400">
+      <Globe className="h-6 w-6" />
+      <span className="max-w-[90%] truncate text-[10px]">{host}</span>
+    </div>
+  );
+}
+
+function KindBadge({ kind }: { kind: string }) {
+  const map: Record<string, { label: string; icon: ReactNode }> = {
+    video: { label: "Video", icon: <IconVideo className="h-3 w-3" /> },
+    image: { label: "Ảnh", icon: <IconImage className="h-3 w-3" /> },
+    web: { label: "Web", icon: <Globe className="h-3 w-3" /> },
+  };
+  const k = map[kind] ?? { label: kind, icon: null };
+  return (
+    <span className="inline-flex items-center gap-1 rounded-md bg-black/70 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-white backdrop-blur-xs">
+      {k.icon}
+      {k.label}
+    </span>
+  );
+}
+
+/** Every target the scorer reads, as compact chips. Only non-default values
+ *  are shown so a glance tells what the advert is actually aimed at. */
+function TargetChips({ item, skip = [] }: { item: Creative; skip?: string[] }) {
+  const chips: { key: string; text: string }[] = [];
+  const push = (key: string, value: string | undefined, options: Option[]) => {
+    if (!skip.includes(key) && value && value !== ANY) chips.push({ key, text: shortLabel(options, value) });
+  };
+  push("age", item.target_age_group, AGE_OPTIONS);
+  push("gender", item.target_gender, GENDER_OPTIONS);
+  push("weather", item.target_weather, WEATHER_OPTIONS);
+  push("pet", item.target_pet, PET_OPTIONS);
+  push("style", item.target_style, STYLE_OPTIONS);
+
+  return (
+    <div className="flex flex-wrap gap-1">
+      {!skip.includes("category") && (
+        <AnimatedBadge size="sm" status="neutral" showIcon={false} className="rounded-md">
+          {item.category || "Chung"}
+        </AnimatedBadge>
+      )}
+      {chips.map((c) => (
+        <AnimatedBadge
+          key={c.key}
+          size="sm"
+          status="info"
+          showIcon={false}
+          className="rounded-md border-indigo-200 bg-indigo-50 text-indigo-700"
+        >
+          {c.text}
+        </AnimatedBadge>
+      ))}
+      {isUntargeted(item) && (
+        <AnimatedBadge
+          size="sm"
+          status="warning"
+          icon={<CircleAlert className="h-3 w-3" />}
+          className="rounded-md"
+          title="Độ tuổi và giới tính đều là 'Tất cả': quảng cáo này phát theo vòng bình thường, không được ưu tiên cho nhóm khán giả nào."
+        >
+          Chưa nhắm đối tượng
+        </AnimatedBadge>
+      )}
+    </div>
+  );
+}
+
+/** current → proposed, so applying is a decision rather than a blind click. */
+function ProposalPanel({
+  item,
+  proposal,
   onApply,
   onDismiss,
   busy,
 }: {
-  profile: CreativeProfileResult;
+  item: Creative;
+  proposal: Proposal;
   onApply: () => void;
   onDismiss: () => void;
   busy: boolean;
 }) {
-  const rows: { label: string; value: string | null }[] = [
-    { label: "Thể loại", value: profile.category },
+  const rows = [
+    { label: "Thể loại", now: item.category || "Chung", next: proposal.category },
     {
-      label: "Nhóm tuổi",
-      value: profile.target_age_group && labelFor(AGE_OPTIONS, profile.target_age_group),
+      label: "Độ tuổi",
+      now: shortLabel(AGE_OPTIONS, item.target_age_group || ANY),
+      next: proposal.target_age_group && shortLabel(AGE_OPTIONS, proposal.target_age_group),
     },
     {
       label: "Giới tính",
-      value: profile.target_gender && labelFor(GENDER_OPTIONS, profile.target_gender),
-    },
-    {
-      label: "Quy mô",
-      value: profile.target_crowd && labelFor(CROWD_OPTIONS, profile.target_crowd),
+      now: shortLabel(GENDER_OPTIONS, item.target_gender || ANY),
+      next: proposal.target_gender && shortLabel(GENDER_OPTIONS, proposal.target_gender),
     },
   ];
-  const hasAny = rows.some((r) => r.value);
+  const changes = rows.filter((r) => r.next && r.next !== r.now);
 
   return (
-    <div className="mt-2.5 rounded-xl border border-violet-200 bg-violet-50/80 p-3 text-[11px] shadow-2xs">
-      <div className="mb-2 flex items-center justify-between gap-2 border-b border-violet-200/60 pb-1.5">
-        <span className="font-bold text-violet-900 flex items-center gap-1.5">
-          <IconSparkles className="h-3.5 w-3.5 text-violet-600" />
-          <span>Kết quả phân tích AI</span>
-          <span className="font-normal text-violet-700">
-            ({SOURCE_LABELS[profile.source] ?? profile.source})
-          </span>
+    <div className="rounded-xl border border-violet-200 bg-violet-50/70 p-3 text-[11px]">
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <span className="flex min-w-0 items-center gap-1.5 font-semibold text-violet-900">
+          <IconSparkles className="h-3.5 w-3.5 shrink-0 text-violet-600" />
+          <span className="truncate">Đề xuất · {SOURCE_LABELS[proposal.source] ?? proposal.source}</span>
         </span>
         <button
           type="button"
           onClick={onDismiss}
-          className="text-violet-400 hover:text-violet-700 text-xs font-semibold transition"
-          title="Đóng"
+          aria-label="Đóng đề xuất"
+          className="rounded-md p-0.5 text-violet-400 transition hover:bg-violet-100 hover:text-violet-700"
         >
-          Đóng
+          <IconClose className="h-3.5 w-3.5" />
         </button>
       </div>
 
-      {hasAny ? (
-        <div className="space-y-1">
-          {rows.map((r) => (
-            <div key={r.label} className="flex justify-between gap-2">
+      {changes.length ? (
+        <ul className="space-y-1">
+          {changes.map((r) => (
+            <li key={r.label} className="flex items-center justify-between gap-2">
               <span className="text-slate-500">{r.label}</span>
-              <span
-                className={
-                  r.value ? "text-right font-semibold text-slate-800" : "text-right text-slate-400"
-                }
-              >
-                {r.value || "không xác định"}
+              <span className="truncate text-right">
+                <span className="text-slate-400 line-through">{r.now}</span>
+                <span className="mx-1 text-slate-400">→</span>
+                <span className="font-semibold text-slate-900">{r.next}</span>
               </span>
-            </div>
+            </li>
           ))}
-        </div>
+        </ul>
       ) : (
-        <p className="text-slate-500">Không suy ra được cấu hình nào từ tệp này.</p>
+        <p className="text-slate-500">Không có gì khác với cấu hình hiện tại.</p>
       )}
 
-      {profile.notes.length > 0 && (
+      {proposal.notes.length > 0 && (
         <ul className="mt-2 space-y-0.5 border-t border-violet-200/60 pt-1.5 text-[10px] text-slate-500">
-          {profile.notes.map((note, i) => (
+          {proposal.notes.map((note, i) => (
             <li key={i}>• {note}</li>
           ))}
         </ul>
       )}
 
-      {hasAny && (
+      {changes.length > 0 && (
         <button
           type="button"
           onClick={onApply}
           disabled={busy}
-          className="mt-2.5 w-full rounded-lg bg-violet-600 py-1.5 text-[11px] font-bold text-white transition hover:bg-violet-700 disabled:opacity-50 shadow-2xs"
+          className="mt-2.5 w-full rounded-lg bg-violet-600 py-1.5 text-[11px] font-semibold text-white transition hover:bg-violet-700 disabled:opacity-50"
         >
-          Áp dụng cấu hình này
+          Áp dụng {changes.length} thay đổi
         </button>
       )}
     </div>
   );
 }
+
+function Stat({
+  label,
+  value,
+  tone = "slate",
+  icon,
+  title,
+}: {
+  label: string;
+  value: number;
+  tone?: "slate" | "emerald" | "amber";
+  icon: ReactNode;
+  title?: string;
+}) {
+  const tones = {
+    slate: "bg-slate-50 text-slate-600 ring-slate-200",
+    emerald: "bg-emerald-50 text-emerald-700 ring-emerald-200",
+    amber: "bg-amber-50 text-amber-700 ring-amber-200",
+  };
+  return (
+    <div title={title} className="flex items-center gap-3 rounded-xl border border-slate-200/80 bg-white px-3.5 py-2.5">
+      <span className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-lg ring-1", tones[tone])}>{icon}</span>
+      <div className="min-w-0">
+        <p className="text-lg font-bold leading-none text-slate-900 tabular">{value}</p>
+        <p className="mt-1 line-clamp-2 text-[11px] leading-tight text-slate-500">{label}</p>
+      </div>
+    </div>
+  );
+}
+
+// ───────────────────────────── page ─────────────────────────────
 
 export default function MediaLibraryPage() {
   const [ads, setAds] = useState<Creative[]>([]);
@@ -133,32 +317,31 @@ export default function MediaLibraryPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
-  const [profiles, setProfiles] = useState<Record<number, CreativeProfileResult>>({});
-  const [analyzing, setAnalyzing] = useState<number | null>(null);
+  const [proposals, setProposals] = useState<Record<number, Proposal>>({});
+  const [working, setWorking] = useState<{ id: number; tool: "name" | "scan" } | null>(null);
 
-  // View Mode: Bento Grid vs List Table
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
-
-  // Search & Filter
   const [searchQuery, setSearchQuery] = useState("");
-  const [filterKind, setFilterKind] = useState<"all" | "video" | "image">("all");
+  const [filterKind, setFilterKind] = useState<KindFilter>("all");
   const [filterCategory, setFilterCategory] = useState<string>("all");
+  const [filterStatus, setFilterStatus] = useState<StatusFilter>("all");
 
-  // Upload Modal
   const [showUploadModal, setShowUploadModal] = useState(false);
-
-  // Edit Media Modal
   const [editingMedia, setEditingMedia] = useState<Creative | null>(null);
-
-  // Add to Playlist Modal
   const [targetCreative, setTargetCreative] = useState<Creative | null>(null);
+  // One row's action rail open at a time, so the table never fills with them.
+  const [openRow, setOpenRow] = useState<number | null>(null);
+  // The viewer morphs from the thumbnail and needs each media's real aspect
+  // ratio; it is read from the thumbnail as it loads, 16:9 until then.
+  const [dims, setDims] = useState<Record<number, [number, number]>>({});
+  const measure = useCallback((id: number, w: number, h: number) => {
+    if (w > 0 && h > 0)
+      setDims((prev) => (prev[id]?.[0] === w && prev[id]?.[1] === h ? prev : { ...prev, [id]: [w, h] }));
+  }, []);
 
   const refresh = useCallback(async () => {
     try {
-      const [allAds, allPlaylists] = await Promise.all([
-        api.listAds(),
-        api.listPlaylists(),
-      ]);
+      const [allAds, allPlaylists] = await Promise.all([api.listAds(), api.listPlaylists()]);
       setAds(allAds);
       setPlaylists(allPlaylists);
     } catch (err) {
@@ -166,9 +349,12 @@ export default function MediaLibraryPage() {
     }
   }, []);
 
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
+  useRefresh(refresh);
+
+  const flash = (msg: string, ms = 4000) => {
+    setInfo(msg);
+    setTimeout(() => setInfo((cur) => (cur === msg ? null : cur)), ms);
+  };
 
   const act = async (fn: () => Promise<unknown>) => {
     setBusy(true);
@@ -183,728 +369,638 @@ export default function MediaLibraryPage() {
     }
   };
 
-  const handleAnalyze = async (ad: Creative) => {
-    setAnalyzing(ad.id);
+  const dropProposal = (id: number) =>
+    setProposals((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+
+  // Smart selection only ever scores the active playlist (PlaylistPlayer.playlist),
+  // so whether an advert is on air decides whether its targets matter at all.
+  const activePlaylist = playlists.find((p) => p.is_active) ?? null;
+  const onAir = useMemo(
+    () => new Set((activePlaylist?.items ?? []).map((i) => i.creative_id)),
+    [activePlaylist],
+  );
+
+  const handleSuggestByName = async (ad: Creative) => {
+    setWorking({ id: ad.id, tool: "name" });
+    setError(null);
+    try {
+      const res = await api.suggestTarget(ad.name);
+      // "all"/"Chung" is the matcher finding no keyword. Proposing it would
+      // overwrite a target someone chose by hand with "no target".
+      const proposal: Proposal = {
+        source: "name",
+        category: res.category && res.category !== "Chung" ? res.category : null,
+        target_age_group: res.target_age_group !== ANY ? res.target_age_group : null,
+        target_gender: res.target_gender !== ANY ? res.target_gender : null,
+        notes: res.reason ? [res.reason] : [],
+      };
+      setProposals((prev) => ({ ...prev, [ad.id]: proposal }));
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setWorking(null);
+    }
+  };
+
+  const handleScan = async (ad: Creative) => {
+    setWorking({ id: ad.id, tool: "scan" });
     setError(null);
     try {
       const res = await api.analyzeAd(ad.id);
-      setProfiles((prev) => ({ ...prev, [ad.id]: res }));
-      if (res.source === "none") {
-        setInfo(`Không đọc được gì từ "${ad.name}" — xem lý do trong khung phân tích.`);
-        setTimeout(() => setInfo(null), 5000);
-      }
+      setProposals((prev) => ({ ...prev, [ad.id]: res }));
     } catch (err) {
       setError((err as Error).message);
     } finally {
-      setAnalyzing(null);
+      setWorking(null);
     }
   };
 
-  const applyProfile = (ad: Creative, profile: CreativeProfileResult) => {
+  const applyProposal = (ad: Creative, p: Proposal) => {
     const patch: Parameters<typeof api.updateAd>[1] = {};
-    if (profile.category) patch.category = profile.category;
-    if (profile.target_age_group) patch.target_age_group = profile.target_age_group;
-    if (profile.target_gender) patch.target_gender = profile.target_gender;
-    if (profile.target_crowd) patch.target_crowd = profile.target_crowd;
+    if (p.category) patch.category = p.category;
+    if (p.target_age_group) patch.target_age_group = p.target_age_group;
+    if (p.target_gender) patch.target_gender = p.target_gender;
     if (Object.keys(patch).length === 0) return;
     act(async () => {
       await api.updateAd(ad.id, patch);
-      setProfiles((prev) => {
-        const next = { ...prev };
-        delete next[ad.id];
-        return next;
-      });
-      setInfo(`Đã áp dụng cấu hình phân tích cho "${ad.name}".`);
-      setTimeout(() => setInfo(null), 4000);
+      dropProposal(ad.id);
+      flash(`Đã áp dụng đề xuất cho "${ad.name}".`);
     });
   };
 
-  const handleAutoSuggest = async (ad: Creative) => {
-    try {
-      setBusy(true);
-      const res = await api.suggestTarget(ad.name);
-      await api.updateAd(ad.id, {
-        category: res.category,
-        target_age_group: res.target_age_group,
-        target_gender: res.target_gender,
-      });
-      setInfo(
-        `Đã gợi ý cho "${ad.name}": ${res.category} (Tuổi: ${res.target_age_group}, Giới tính: ${res.target_gender})`
-      );
-      setTimeout(() => setInfo(null), 5000);
-      await refresh();
-    } catch (err) {
-      setError((err as Error).message);
-    } finally {
-      setBusy(false);
+  const remove = (ad: Creative) => {
+    const live = onAir.has(ad.id) ? "\n\nTệp này đang nằm trong playlist đang phát." : "";
+    if (confirm(`Xoá vĩnh viễn "${ad.name}"? Tệp và toàn bộ dữ liệu đo sẽ bị xoá.${live}`)) {
+      act(() => api.deleteAd(ad.id));
     }
   };
 
-  const formatSeconds = (sec: number) => {
-    const s = Math.round(sec);
-    if (s < 60) return `${s}s`;
-    const m = Math.floor(s / 60);
-    const rem = s % 60;
-    return `${m}p ${rem > 0 ? `${rem}s` : ""}`.trim();
-  };
-
-  const handleAddMediaToPlaylist = async (playlistId: number, creativeId: number) => {
+  const handleAddMediaToPlaylist = (playlistId: number, creativeId: number) =>
     act(async () => {
       const pl = playlists.find((p) => p.id === playlistId);
       await api.addPlaylistItem(playlistId, creativeId);
-      setInfo(`Đã thêm tệp vào Playlist "${pl?.name || "được chọn"}"!`);
       setTargetCreative(null);
-      setTimeout(() => setInfo(null), 3000);
+      flash(`Đã thêm vào playlist "${pl?.name || "được chọn"}".`, 3000);
     });
-  };
 
-  // Filtered Media
+  // A category typed through the URL form, or saved before the vocabulary was
+  // fixed, is still a real value — offer it so it can be filtered on.
+  const categoryOptions: Option[] = useMemo(() => {
+    const extra = [...new Set(ads.map((a) => a.category || "Chung"))].filter((c) => !CATEGORY_OPTIONS.includes(c));
+    return [
+      { value: "all", label: "Tất cả thể loại" },
+      ...[...CATEGORY_OPTIONS, ...extra].map((c) => ({ value: c, label: c })),
+    ];
+  }, [ads]);
+
   const filteredMedia = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
     return ads.filter((item) => {
       if (filterKind !== "all" && item.kind !== filterKind) return false;
-      if (filterCategory !== "all" && item.category !== filterCategory) return false;
-      if (searchQuery.trim()) {
-        const q = searchQuery.toLowerCase();
-        const matchName = item.name.toLowerCase().includes(q);
-        const matchCat = (item.category || "").toLowerCase().includes(q);
-        const matchFile = (item.filename || "").toLowerCase().includes(q);
-        if (!matchName && !matchCat && !matchFile) return false;
+      if (filterCategory !== "all" && (item.category || "Chung") !== filterCategory) return false;
+      if (filterStatus === "on-air" && !onAir.has(item.id)) return false;
+      if (filterStatus === "untargeted" && !isUntargeted(item)) return false;
+      if (q) {
+        const hay = `${item.name} ${item.category || ""} ${item.filename || ""}`.toLowerCase();
+        if (!hay.includes(q)) return false;
       }
       return true;
     });
-  }, [ads, filterKind, filterCategory, searchQuery]);
+  }, [ads, filterKind, filterCategory, filterStatus, searchQuery, onAir]);
+
+  const viewerItems: ImageViewerImage[] = useMemo(
+    () =>
+      filteredMedia
+        .filter((m) => m.kind === "image" || m.kind === "video")
+        .map((m) => ({
+          id: String(m.id),
+          src: mediaUrl(m.url),
+          alt: m.name,
+          kind: m.kind as "image" | "video",
+          width: dims[m.id]?.[0] ?? 16,
+          height: dims[m.id]?.[1] ?? 9,
+          caption: `${m.name} · ${formatDuration(m.duration)}`,
+        })),
+    [filteredMedia, dims],
+  );
+
+  const untargetedOnAir = ads.filter((a) => onAir.has(a.id) && isUntargeted(a)).length;
+
+  /** Every per-media action, shared by the card rail and the table rail. */
+  const actionItems = (item: Creative): OverflowActionItem[] => {
+    const mine = working?.id === item.id;
+    return [
+      {
+        id: "name",
+        label: mine && working.tool === "name" ? "Đang đoán…" : "Gợi ý theo tên",
+        icon: <WandSparkles className="h-3.5 w-3.5" />,
+        iconOnly: true,
+        disabled: working !== null,
+        onClick: () => handleSuggestByName(item),
+        className: "bg-amber-50 text-amber-700 hover:bg-amber-100",
+      },
+      {
+        id: "scan",
+        label: mine && working.tool === "scan" ? "Đang quét…" : "Quét nội dung",
+        icon: <ScanSearch className="h-3.5 w-3.5" />,
+        iconOnly: true,
+        disabled: working !== null || item.kind === "web",
+        onClick: () => handleScan(item),
+        className: "bg-violet-50 text-violet-700 hover:bg-violet-100",
+      },
+      {
+        id: "edit",
+        label: "Sửa",
+        icon: <IconEdit className="h-3.5 w-3.5" />,
+        iconOnly: true,
+        onClick: () => setEditingMedia(item),
+        className: "bg-slate-100 text-slate-700 hover:bg-slate-200",
+      },
+      {
+        id: "playlist",
+        label: "Playlist",
+        icon: <IconPlus className="h-3.5 w-3.5" />,
+        onClick: () => setTargetCreative(item),
+        className: "bg-emerald-50 text-emerald-800 hover:bg-emerald-100",
+      },
+      {
+        id: "delete",
+        label: "Xoá",
+        icon: <IconTrash className="h-3.5 w-3.5" />,
+        iconOnly: true,
+        disabled: busy,
+        onClick: () => remove(item),
+        className: "bg-rose-50 text-rose-600 hover:bg-rose-100",
+      },
+    ];
+  };
+
+  /** Collapsed to one button until clicked; one rail open on the page at a time. */
+  const actionRail = (item: Creative, primary: string[] = []) => {
+    const items = actionItems(item);
+    return (
+      <OverflowActions
+        size="sm"
+        expanded={openRow === item.id}
+        onExpandedChange={(open) => setOpenRow(open ? item.id : null)}
+        collapseOnAction
+        primaryActions={items.filter((a) => primary.includes(a.id))}
+        overflowActions={items.filter((a) => !primary.includes(a.id))}
+        openLabel="Mở thao tác"
+        closeLabel="Thu gọn"
+        classNames={{ track: "border-slate-200 bg-white shadow-2xs" }}
+      />
+    );
+  };
+
+  /** A thumbnail that opens the shared viewer; web pages have nothing to preview. */
+  const preview = (item: Creative, className: string, children?: ReactNode) =>
+    item.kind === "image" || item.kind === "video" ? (
+      <ImageViewerThumbnail
+        imageId={String(item.id)}
+        onMeasure={(w, h) => measure(item.id, w, h)}
+        className={cn("group/thumb relative overflow-hidden bg-slate-950", className)}
+        imageClassName="h-full w-full object-contain"
+      >
+        {item.kind === "video" && (
+          <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
+            <span className="flex h-9 w-9 items-center justify-center rounded-full bg-black/55 text-white backdrop-blur-xs transition group-hover/thumb:scale-110">
+              <Play className="ml-0.5 h-4 w-4 fill-current" />
+            </span>
+          </span>
+        )}
+        {children}
+      </ImageViewerThumbnail>
+    ) : (
+      <div className={cn("relative overflow-hidden bg-slate-950", className)}>
+        <Thumb item={item} />
+        {children}
+      </div>
+    );
+
+  const columns: TableColumn<Creative>[] = [
+    {
+      key: "name",
+      header: "Media",
+      sortable: true,
+      cell: (item) => (
+        <div className="flex min-w-0 items-center gap-3">
+          {preview(item, "aspect-video w-20 shrink-0 rounded-md border border-slate-200")}
+          <div className="min-w-0">
+            <p className="flex items-center gap-1.5 truncate font-semibold text-slate-900">
+              <span className="truncate">{item.name}</span>
+              {onAir.has(item.id) && <Radio className="h-3.5 w-3.5 shrink-0 text-emerald-600" aria-label="Đang phát" />}
+            </p>
+            <p className="truncate text-[10px] text-slate-400">{item.filename}</p>
+          </div>
+        </div>
+      ),
+    },
+    {
+      key: "kind",
+      header: "Loại",
+      width: "90px",
+      sortable: true,
+      cell: (item) => <span className="capitalize text-slate-600">{item.kind === "image" ? "Ảnh" : item.kind}</span>,
+    },
+    {
+      key: "duration",
+      header: "Thời lượng",
+      width: "100px",
+      align: "right",
+      sortable: true,
+      cell: (item) => <span className="font-mono text-slate-700 tabular">{formatDuration(item.duration)}</span>,
+    },
+    {
+      key: "targets",
+      header: "Đối tượng nhắm tới",
+      width: "34%",
+      sortValue: (item) => (isUntargeted(item) ? 0 : 1),
+      sortable: true,
+      cell: (item) => <TargetChips item={item} />,
+    },
+    {
+      key: "actions",
+      header: "Thao tác",
+      width: "290px",
+      align: "right",
+      cell: (item) => <div className="flex justify-end">{actionRail(item)}</div>,
+    },
+  ];
 
   return (
-    <main className="w-full space-y-6 px-4 py-6 sm:px-6 lg:px-8 max-w-[1920px] mx-auto">
-      {/* ==================== HEADER CARD ==================== */}
-      <section className="rounded-2xl border border-slate-200/90 bg-white p-5 sm:p-6 shadow-xs">
+    <main className="mx-auto w-full max-w-[1920px] space-y-5 px-4 py-6 sm:px-6 lg:px-8">
+      {/* ==================== HEADER ==================== */}
+      <section className="rounded-2xl border border-slate-200/90 bg-white p-5 shadow-xs sm:p-6">
         <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex items-center gap-3">
             <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-emerald-700 ring-1 ring-emerald-500/20">
               <IconMedia className="h-6 w-6" />
             </div>
             <div>
-              <h1 className="text-lg font-extrabold text-slate-900 sm:text-xl tracking-tight">
-                Thư Viện Media
-              </h1>
-              <p className="text-xs text-slate-500 mt-0.5">
-                Kho lưu trữ độc lập toàn bộ hình ảnh và video quảng cáo gốc. Tải lên và phân phối vào các Playlist.
+              <h1 className="text-lg font-extrabold tracking-tight text-slate-900 sm:text-xl">Thư viện Media</h1>
+              <p className="mt-0.5 text-xs text-slate-500">
+                Tải lên quảng cáo, gắn đối tượng nhắm tới và đưa vào playlist. Đối tượng gắn ở đây là thứ bộ chọn quảng
+                cáo thông minh dùng để chấm điểm.
               </p>
             </div>
           </div>
 
-          {/* Action buttons */}
           <div className="flex flex-wrap items-center gap-2.5">
             <button
               type="button"
               onClick={() => setShowUploadModal(true)}
-              className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-xs font-bold text-white transition hover:bg-emerald-700 shadow-sm cursor-pointer"
+              className="inline-flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-xs font-bold text-white shadow-sm transition hover:bg-emerald-700"
             >
               <IconUpload className="h-4 w-4" />
-              <span>Tải lên Media mới</span>
+              Tải lên media
             </button>
-
             <Link
               href="/playlists/new"
-              className="inline-flex items-center gap-2 rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-2.5 text-xs font-bold text-emerald-800 transition hover:bg-emerald-100 shadow-2xs"
+              className="inline-flex items-center gap-2 rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-2.5 text-xs font-bold text-emerald-800 transition hover:bg-emerald-100"
             >
               <IconPlus className="h-4 w-4" />
-              <span>Tạo Playlist</span>
+              Tạo playlist
             </Link>
           </div>
         </div>
+
+        <div className="mt-5 grid grid-cols-2 gap-2.5 lg:grid-cols-4">
+          <Stat label="Tổng số media" value={ads.length} icon={<IconMedia className="h-4 w-4" />} />
+          <Stat
+            label={activePlaylist ? "Trong playlist đang phát" : "Chưa có playlist đang phát"}
+            title={activePlaylist?.name}
+            value={onAir.size}
+            tone="emerald"
+            icon={<Radio className="h-4 w-4" />}
+          />
+          <Stat
+            label="Đã nhắm đối tượng"
+            value={ads.filter((a) => !isUntargeted(a)).length}
+            icon={<Target className="h-4 w-4" />}
+          />
+          <Stat
+            label="Đang phát nhưng chưa nhắm"
+            value={untargetedOnAir}
+            tone={untargetedOnAir ? "amber" : "slate"}
+            icon={<CircleAlert className="h-4 w-4" />}
+          />
+        </div>
       </section>
+
+      {/* The smart picker scores only the active playlist; with nothing in it
+          every tag on this page is inert, and that is not visible anywhere else. */}
+      {(!activePlaylist || onAir.size === 0) && ads.length > 0 && (
+        <div className="flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
+          <CircleAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+          <p>
+            {activePlaylist ? (
+              <>
+                Playlist đang phát <strong>“{activePlaylist.name}”</strong> chưa có media nào.
+              </>
+            ) : (
+              <>Chưa có playlist nào đang phát.</>
+            )}{" "}
+            Chọn quảng cáo thông minh chỉ chấm điểm các media trong playlist đang phát, nên lúc này nó không có gì để
+            chọn. Bấm “Playlist” trên từng media để thêm vào.
+          </p>
+        </div>
+      )}
 
       {/* Notifications */}
       {info && (
-        <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs font-medium text-emerald-800 flex items-center justify-between shadow-2xs">
+        <div className="flex items-center justify-between rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs font-medium text-emerald-800">
           <span>{info}</span>
-          <button
-            onClick={() => setInfo(null)}
-            className="text-emerald-700 hover:text-emerald-950 font-semibold"
-          >
-            Đóng
+          <button onClick={() => setInfo(null)} aria-label="Đóng" className="text-emerald-700 hover:text-emerald-950">
+            <IconClose className="h-4 w-4" />
+          </button>
+        </div>
+      )}
+      {error && (
+        <div className="flex items-center justify-between rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-medium text-rose-700">
+          <span>{error}</span>
+          <button onClick={() => setError(null)} aria-label="Đóng" className="text-rose-700 hover:text-rose-950">
+            <IconClose className="h-4 w-4" />
           </button>
         </div>
       )}
 
-      {error && (
-        <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-medium text-rose-700 flex items-center justify-between shadow-2xs">
-          <span>{error}</span>
-          <button
-            onClick={() => setError(null)}
-            className="text-rose-700 hover:text-rose-950 font-semibold"
-          >
-            Đóng
-          </button>
-        </div>
-      )}
-      {/* Upload Media Modal */}
       <UploadMediaModal
         isOpen={showUploadModal}
         onClose={() => setShowUploadModal(false)}
         onUploadSuccess={(count) => {
-          setInfo(`Đã tải lên thành công ${count} tệp vào Thư viện Media!`);
+          flash(`Đã tải lên ${count} tệp vào thư viện.`);
           refresh();
-          setTimeout(() => setInfo(null), 4000);
         }}
       />
 
-      {/* Edit Media Modal */}
       <EditMediaModal
+        key={editingMedia?.id ?? "closed"}
         isOpen={Boolean(editingMedia)}
         media={editingMedia}
         onClose={() => setEditingMedia(null)}
         onSaveSuccess={async () => {
           await refresh();
-          setInfo("Đã lưu các thuộc tính media thành công!");
-          setTimeout(() => setInfo(null), 4000);
+          flash("Đã lưu thuộc tính media.");
         }}
       />
 
-      {/* ==================== BENTO SECTION 2: TOOLBAR & VIEW SWITCHER ==================== */}
-      <section className="flex flex-col gap-3 rounded-2xl border border-slate-200/90 bg-white p-3.5 sm:p-4 shadow-xs lg:flex-row lg:items-center lg:justify-between">
-        {/* Left: Search and Filters */}
-        <div className="flex flex-wrap items-center gap-2.5">
-          {/* Search bar */}
-          <div className="relative w-full sm:w-72">
-            <span className="absolute inset-y-0 left-0 flex items-center pl-3 text-slate-400 pointer-events-none">
-              <IconSearch className="h-4 w-4" />
-            </span>
-            <input
-              type="text"
-              placeholder="Tìm kiếm tên tệp, thể loại..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full rounded-xl border border-slate-200 bg-slate-50/60 pl-9 pr-3 py-2 text-xs text-slate-800 placeholder-slate-400 outline-none focus:border-emerald-500 focus:bg-white transition"
-            />
-          </div>
-
-          {/* Filter format */}
-          <CustomSelect
+      {/* ==================== TOOLBAR ==================== */}
+      <section className="relative z-20 flex flex-col gap-3 rounded-2xl border border-slate-200/90 bg-white p-3.5 shadow-xs sm:p-4 xl:flex-row xl:items-center xl:justify-between">
+        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 lg:flex lg:flex-wrap lg:items-center">
+          <Input
+            value={searchQuery}
+            onChange={setSearchQuery}
+            placeholder="Tìm theo tên, tệp, thể loại…"
+            aria-label="Tìm kiếm media"
+            leftIcon={<IconSearch />}
+            className="sm:col-span-2 lg:w-72"
+            classNames={{ field: "h-9 rounded-xl bg-slate-50/60", input: "text-xs" }}
+          />
+          <FieldSelect
             value={filterKind}
-            onChange={(val) => setFilterKind(val as "all" | "video" | "image")}
+            onChange={(v) => setFilterKind(v as KindFilter)}
             options={[
               { value: "all", label: "Tất cả định dạng" },
-              { value: "video", label: "Chỉ Video" },
-              { value: "image", label: "Chỉ Hình ảnh" },
+              { value: "video", label: "Video" },
+              { value: "image", label: "Hình ảnh" },
+              { value: "web", label: "Trang web" },
             ]}
-            className="w-40"
-            buttonClassName="bg-slate-50/60 border-slate-200 text-slate-700"
+            className="lg:w-44"
+            triggerClassName="bg-slate-50/60"
           />
-
-          {/* Filter category */}
-          <CustomSelect
+          <FieldSelect
             value={filterCategory}
             onChange={setFilterCategory}
+            options={categoryOptions}
+            className="lg:w-52"
+            triggerClassName="bg-slate-50/60"
+          />
+          <FieldSelect
+            value={filterStatus}
+            onChange={(v) => setFilterStatus(v as StatusFilter)}
             options={[
-              { value: "all", label: "Tất cả thể loại" },
-              ...CATEGORY_OPTIONS.map((c) => ({ value: c, label: c })),
+              { value: "all", label: "Mọi trạng thái" },
+              { value: "on-air", label: "Đang trong playlist phát" },
+              { value: "untargeted", label: "Chưa nhắm đối tượng" },
             ]}
-            className="w-44"
-            buttonClassName="bg-slate-50/60 border-slate-200 text-slate-700"
+            className="lg:w-52"
+            triggerClassName="bg-slate-50/60"
           />
         </div>
 
-        {/* Right: Items Count & View Mode Toggle (Grid / List) */}
-        <div className="flex items-center justify-between sm:justify-end gap-3 text-xs border-t lg:border-t-0 pt-2 lg:pt-0 border-slate-100">
-          <span className="text-slate-500 font-medium">
-            Hiển thị: <strong className="text-slate-900">{filteredMedia.length}</strong> / {ads.length} tệp
+        <div className="flex items-center justify-between gap-3 border-t border-slate-100 pt-3 text-xs xl:border-t-0 xl:pt-0">
+          <span className="font-medium text-slate-500">
+            Hiển thị <strong className="text-slate-900 tabular">{filteredMedia.length}</strong> / {ads.length}
           </span>
-
-          {/* View Mode Toggle: Bento Grid vs List Table */}
-          <div className="flex items-center rounded-xl bg-slate-100 p-1 border border-slate-200">
-            <button
-              type="button"
-              onClick={() => setViewMode("grid")}
-              className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition ${
-                viewMode === "grid"
-                  ? "bg-white text-emerald-800 shadow-2xs"
-                  : "text-slate-600 hover:text-slate-900"
-              }`}
-              title="Chế độ xem Bento Grid"
-            >
-              <IconGrid className="h-3.5 w-3.5" />
-              <span>Lưới</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setViewMode("list")}
-              className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition ${
-                viewMode === "list"
-                  ? "bg-white text-emerald-800 shadow-2xs"
-                  : "text-slate-600 hover:text-slate-900"
-              }`}
-              title="Chế độ xem Danh sách"
-            >
-              <IconList className="h-3.5 w-3.5" />
-              <span>Danh sách</span>
-            </button>
-          </div>
+          <Tabs value={viewMode} onValueChange={(v) => setViewMode(v as "grid" | "list")} variant="segment">
+            <TabsList className="border border-slate-200 bg-slate-100">
+              <TabsTrigger value="grid">
+                <span className="inline-flex items-center gap-1.5 text-xs">
+                  <IconGrid className="h-3.5 w-3.5" /> Lưới
+                </span>
+              </TabsTrigger>
+              <TabsTrigger value="list">
+                <span className="inline-flex items-center gap-1.5 text-xs">
+                  <IconList className="h-3.5 w-3.5" /> Danh sách
+                </span>
+              </TabsTrigger>
+            </TabsList>
+          </Tabs>
         </div>
       </section>
 
-      {/* ==================== BENTO SECTION 3: MEDIA ITEMS (GRID OR LIST) ==================== */}
-      {viewMode === "grid" ? (
-        /* ==================== 3A. BENTO GRID VIEW ==================== */
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 2xl:grid-cols-5 gap-4.5">
+      {/* ==================== ITEMS ==================== */}
+      <ImageViewer images={viewerItems} label="Xem trước media">
+      {!filteredMedia.length ? (
+        <div className="rounded-2xl border border-dashed border-slate-300 bg-white p-12 text-center">
+          <p className="text-sm font-bold text-slate-800">
+            {ads.length ? "Không có media nào khớp bộ lọc" : "Thư viện đang trống"}
+          </p>
+          <p className="mt-1 text-xs text-slate-500">
+            {ads.length
+              ? "Thử bỏ bớt bộ lọc hoặc đổi từ khoá tìm kiếm."
+              : "Bấm “Tải lên media” để thêm video hoặc hình ảnh quảng cáo đầu tiên."}
+          </p>
+        </div>
+      ) : viewMode === "grid" ? (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4 min-[1800px]:grid-cols-5">
           {filteredMedia.map((item) => (
-            <div
+            <article
               key={item.id}
-              className="group rounded-2xl border border-slate-200/90 bg-white p-3.5 shadow-xs transition hover:border-emerald-400 hover:shadow-md flex flex-col justify-between"
+              className="group flex flex-col rounded-2xl border border-slate-200/90 bg-white p-3 shadow-xs transition hover:border-emerald-300 hover:shadow-md"
             >
-              <div className="space-y-3">
-                {/* Thumbnail Preview Card */}
-                <div className="relative aspect-video w-full overflow-hidden rounded-xl border border-slate-200 bg-slate-950">
-                  {item.kind === "image" ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      src={mediaUrl(item.url)}
-                      alt={item.name}
-                      className="h-full w-full object-contain transition duration-200 group-hover:scale-105"
-                    />
-                  ) : (
-                    <video
-                      src={mediaUrl(item.url)}
-                      muted
-                      className="h-full w-full object-contain"
-                    />
-                  )}
-
-                  {/* Top Badges */}
-                  <div className="absolute top-2 left-2 flex items-center gap-1.5">
-                    <span className="inline-flex items-center gap-1 rounded-md bg-black/75 px-2 py-0.5 text-[10px] font-bold text-white uppercase tracking-wider backdrop-blur-xs">
-                      {item.kind === "video" ? (
-                        <>
-                          <IconVideo className="h-3 w-3" />
-                          <span>Video</span>
-                        </>
-                      ) : (
-                        <>
-                          <IconImage className="h-3 w-3" />
-                          <span>Ảnh</span>
-                        </>
-                      )}
-                    </span>
-                    <span className="inline-flex items-center gap-1 rounded-md bg-black/75 px-1.5 py-0.5 text-[10px] font-medium text-white tabular backdrop-blur-xs">
+              {preview(
+                item,
+                "aspect-video w-full rounded-xl",
+                <>
+                  <div className="pointer-events-none absolute left-2 top-2 flex items-center gap-1.5">
+                    <KindBadge kind={item.kind} />
+                    <span className="inline-flex items-center gap-1 rounded-md bg-black/70 px-1.5 py-0.5 text-[10px] font-medium text-white tabular backdrop-blur-xs">
                       <IconClock className="h-3 w-3" />
-                      <span>{item.duration}s</span>
+                      {formatDuration(item.duration)}
                     </span>
                   </div>
-                </div>
+                  {onAir.has(item.id) && (
+                    <span className="pointer-events-none absolute right-2 top-2 inline-flex items-center gap-1 rounded-md bg-emerald-600 px-1.5 py-0.5 text-[10px] font-semibold text-white">
+                      <Radio className="h-3 w-3" /> Đang phát
+                    </span>
+                  )}
+                </>,
+              )}
 
-                {/* Name & Quick Rename */}
-                <div>
-                  <div className="flex items-center justify-between gap-1.5">
-                    <input
-                      defaultValue={item.name}
-                      onBlur={(e) =>
-                        e.target.value !== item.name &&
-                        act(() => api.updateAd(item.id, { name: e.target.value }))
-                      }
-                      title="Bấm để sửa tên"
-                      className="w-full truncate rounded-md border border-transparent bg-transparent px-1 py-0.5 text-xs font-bold text-slate-900 outline-none transition hover:border-slate-300 focus:border-emerald-500 focus:bg-white"
-                    />
-                  </div>
-                  <p className="text-[10px] text-slate-400 truncate px-1">{item.filename}</p>
-                </div>
+              <button
+                type="button"
+                onClick={() => setEditingMedia(item)}
+                title="Bấm để sửa thuộc tính"
+                className="mt-3 min-w-0 rounded-md px-1 text-left transition hover:bg-slate-50"
+              >
+                <p className="truncate text-sm font-semibold text-slate-900">{item.name}</p>
+                <p className="truncate text-[10px] text-slate-400">{item.filename}</p>
+              </button>
 
-                {/* Targeting Selectors */}
-                <div className="grid grid-cols-2 gap-1.5 pt-1">
-                  <CustomSelect
-                    size="sm"
-                    value={item.category || "Chung"}
-                    onChange={(val) => act(() => api.updateAd(item.id, { category: val }))}
-                    options={CATEGORY_OPTIONS}
-                    buttonClassName="bg-slate-50 border-slate-200 text-slate-700"
-                  />
+              <div className="mt-2 px-1">
+                <TargetChips item={item} />
+              </div>
 
-                  <CustomSelect
-                    size="sm"
-                    menuAlign="right"
-                    value={item.target_age_group || "all"}
-                    onChange={(val) => act(() => api.updateAd(item.id, { target_age_group: val }))}
-                    options={AGE_OPTIONS}
-                    buttonClassName="bg-indigo-50/70 border-indigo-200 text-indigo-800"
-                  />
-                </div>
-
-                {/* AI Analysis Buttons */}
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => handleAutoSuggest(item)}
-                    disabled={busy}
-                    title="AI phân tích tên để đề xuất nhóm đối tượng"
-                    className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] font-semibold text-amber-800 transition hover:bg-amber-100 disabled:opacity-50"
-                  >
-                    <IconSparkles className="h-3 w-3" />
-                    <span>AI Gợi ý</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => handleAnalyze(item)}
-                    disabled={analyzing !== null}
-                    title="AI xem nội dung media: nhận diện độ tuổi, giới tính"
-                    className="flex-1 inline-flex items-center justify-center gap-1 rounded-lg border border-violet-200 bg-violet-50 px-2 py-1 text-[10px] font-semibold text-violet-800 transition hover:bg-violet-100 disabled:opacity-50"
-                  >
-                    <IconSearch className="h-3 w-3" />
-                    <span>{analyzing === item.id ? "Đang quét..." : "Phân tích AI"}</span>
-                  </button>
-                </div>
-
-                {/* AI Result Card if analyzed */}
-                {profiles[item.id] && (
-                  <ProfilePanel
-                    profile={profiles[item.id]}
-                    onApply={() => applyProfile(item, profiles[item.id])}
-                    onDismiss={() =>
-                      setProfiles((prev) => {
-                        const next = { ...prev };
-                        delete next[item.id];
-                        return next;
-                      })
-                    }
+              {proposals[item.id] && (
+                <div className="mt-2.5 px-1">
+                  <ProposalPanel
+                    item={item}
+                    proposal={proposals[item.id]}
+                    onApply={() => applyProposal(item, proposals[item.id])}
+                    onDismiss={() => dropProposal(item.id)}
                     busy={busy}
                   />
-                )}
-              </div>
-
-              {/* Action Footer */}
-              <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between gap-1.5 text-xs">
-                <button
-                  type="button"
-                  onClick={() => setEditingMedia(item)}
-                  className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-bold text-slate-700 hover:bg-slate-50 hover:border-slate-300 transition shadow-2xs cursor-pointer"
-                  title="Chỉnh sửa toàn bộ thuộc tính media"
-                >
-                  <IconEdit className="h-3.5 w-3.5 text-slate-500" />
-                  <span>Sửa</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setTargetCreative(item)}
-                  className="flex-1 inline-flex items-center justify-center gap-1 rounded-xl border border-emerald-300 bg-emerald-50 px-2.5 py-1.5 text-xs font-bold text-emerald-800 hover:bg-emerald-100 transition shadow-2xs cursor-pointer"
-                >
-                  <IconPlus className="h-3.5 w-3.5" />
-                  <span>Playlist</span>
-                </button>
-
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => {
-                    if (
-                      confirm(
-                        `Xoá vĩnh viễn tệp "${item.name}" khỏi Thư viện Media? Tệp tin và toàn bộ dữ liệu đo sẽ bị xoá.`
-                      )
-                    ) {
-                      act(() => api.deleteAd(item.id));
-                    }
-                  }}
-                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl border border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100 transition cursor-pointer"
-                  title="Xoá tệp vĩnh viễn"
-                >
-                  <IconTrash className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            </div>
-          ))}
-
-          {!filteredMedia.length && (
-            <div className="col-span-full rounded-2xl border border-slate-200 bg-white p-12 text-center shadow-xs">
-              <p className="text-sm font-bold text-slate-800">Thư viện Media đang trống hoặc không tìm thấy kết quả</p>
-              <p className="mt-1 text-xs text-slate-500">
-                Hãy tải lên các file video hoặc hình ảnh quảng cáo bằng nút &quot;Tải lên Media mới&quot; phía trên.
-              </p>
-            </div>
-          )}
-        </div>
-      ) : (
-        /* ==================== 3B. LIST TABLE VIEW ==================== */
-        <div className="rounded-2xl border border-slate-200/90 bg-white shadow-xs overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs min-w-[860px]">
-              <thead className="border-b border-slate-200 bg-slate-50 text-[11px] font-bold text-slate-500 uppercase tracking-wider">
-                <tr>
-                  <th className="py-3 px-4 w-32">PREVIEW</th>
-                  <th className="py-3 px-4">TÊN TỆP & TÊN FILE</th>
-                  <th className="py-3 px-3 text-center w-28">ĐỊNH DẠNG</th>
-                  <th className="py-3 px-3 text-center w-24">THỜI LƯỢNG</th>
-                  <th className="py-3 px-3 w-36">THỂ LOẠI</th>
-                  <th className="py-3 px-3 w-44">ĐỘ TUỔI MỤC TIÊU</th>
-                  <th className="py-3 px-3 text-center w-40">AI TỰ ĐỘNG</th>
-                  <th className="py-3 px-4 text-right w-44">THAO TÁC</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {filteredMedia.map((item) => (
-                  <tr key={item.id} className="hover:bg-slate-50/70 transition">
-                    {/* Thumbnail */}
-                    <td className="py-2.5 px-4">
-                      <div
-                        onClick={() => setEditingMedia(item)}
-                        className="relative aspect-video w-24 overflow-hidden rounded-lg border border-slate-200 bg-slate-950 cursor-pointer hover:border-emerald-500 transition group/thumb"
-                        title="Bấm để chỉnh sửa thuộc tính media"
-                      >
-                        {item.kind === "image" ? (
-                          // eslint-disable-next-line @next/next/no-img-element
-                          <img
-                            src={mediaUrl(item.url)}
-                            alt={item.name}
-                            className="h-full w-full object-contain group-hover/thumb:scale-105 transition duration-150"
-                          />
-                        ) : (
-                          <video
-                            src={mediaUrl(item.url)}
-                            muted
-                            className="h-full w-full object-contain group-hover/thumb:scale-105 transition duration-150"
-                          />
-                        )}
-                      </div>
-                    </td>
-
-                    {/* Name & Filename */}
-                    <td className="py-2.5 px-4 max-w-[200px]">
-                      <input
-                        defaultValue={item.name}
-                        onBlur={(e) =>
-                          e.target.value !== item.name &&
-                          act(() => api.updateAd(item.id, { name: e.target.value }))
-                        }
-                        title="Bấm để sửa nhanh tên"
-                        className="w-full font-bold text-slate-900 hover:border-slate-300 focus:border-emerald-500 focus:bg-white rounded px-1 py-0.5 border border-transparent bg-transparent outline-none truncate"
-                      />
-                      <p className="text-[10px] text-slate-400 truncate px-1">{item.filename}</p>
-                    </td>
-
-                    {/* Format */}
-                    <td className="py-2.5 px-3 text-center">
-                      <span
-                        className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-[10px] font-bold ${
-                          item.kind === "video"
-                            ? "bg-indigo-50 text-indigo-700 border border-indigo-200"
-                            : "bg-amber-50 text-amber-800 border border-amber-200"
-                        }`}
-                      >
-                        {item.kind === "video" ? (
-                          <>
-                            <IconVideo className="h-3 w-3" />
-                            <span>Video</span>
-                          </>
-                        ) : (
-                          <>
-                            <IconImage className="h-3 w-3" />
-                            <span>Ảnh</span>
-                          </>
-                        )}
-                      </span>
-                    </td>
-
-                    {/* Duration */}
-                    <td className="py-2.5 px-3 text-center">
-                      <button
-                        type="button"
-                        onClick={() => setEditingMedia(item)}
-                        className="inline-flex items-center gap-1 rounded-lg px-2 py-1 font-mono font-medium text-slate-700 hover:bg-slate-100 hover:text-emerald-700 transition cursor-pointer text-xs"
-                        title="Bấm để sửa thời lượng phát"
-                      >
-                        <span>{item.duration}s</span>
-                      </button>
-                    </td>
-
-                    {/* Category */}
-                    <td className="py-2.5 px-3">
-                      <select
-                        value={item.category || "Chung"}
-                        onChange={(e) => act(() => api.updateAd(item.id, { category: e.target.value }))}
-                        className="w-full rounded-xl border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-xs font-medium text-slate-700 outline-none hover:bg-white hover:border-slate-300 focus:border-emerald-500 focus:bg-white transition cursor-pointer shadow-2xs"
-                      >
-                        {CATEGORY_OPTIONS.map((cat) => (
-                          <option key={cat} value={cat}>
-                            {cat}
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-
-                    {/* Target Age */}
-                    <td className="py-2.5 px-3">
-                      <select
-                        value={item.target_age_group || "all"}
-                        onChange={(e) => act(() => api.updateAd(item.id, { target_age_group: e.target.value }))}
-                        className="w-full rounded-xl border border-indigo-200 bg-indigo-50/70 px-2.5 py-1.5 text-xs font-medium text-indigo-800 outline-none hover:bg-white hover:border-indigo-300 focus:border-indigo-500 focus:bg-white transition cursor-pointer shadow-2xs"
-                      >
-                        {AGE_OPTIONS.map((opt) => (
-                          <option key={opt.value} value={opt.value}>
-                            {opt.label}
-                          </option>
-                        ))}
-                      </select>
-                    </td>
-
-                    {/* AI Buttons */}
-                    <td className="py-2.5 px-3 text-center">
-                      <div className="flex items-center justify-center gap-1">
-                        <button
-                          type="button"
-                          onClick={() => handleAutoSuggest(item)}
-                          disabled={busy}
-                          title="Tự động đề xuất theo tên"
-                          className="rounded-lg border border-amber-200 bg-amber-50 px-2 py-1 text-[10px] font-semibold text-amber-800 hover:bg-amber-100 cursor-pointer"
-                        >
-                          Gợi ý
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleAnalyze(item)}
-                          disabled={analyzing !== null}
-                          title="Phân tích nội dung media"
-                          className="rounded-lg border border-violet-200 bg-violet-50 px-2 py-1 text-[10px] font-semibold text-violet-800 hover:bg-violet-100 disabled:opacity-50 cursor-pointer"
-                        >
-                          {analyzing === item.id ? "..." : "Quét AI"}
-                        </button>
-                      </div>
-                    </td>
-
-                    {/* Actions */}
-                    <td className="py-2.5 px-4 text-right">
-                      <div className="flex items-center justify-end gap-1.5">
-                        <button
-                          type="button"
-                          onClick={() => setEditingMedia(item)}
-                          className="inline-flex items-center gap-1 rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-700 hover:bg-slate-50 hover:border-slate-300 transition shadow-2xs cursor-pointer"
-                          title="Chỉnh sửa toàn bộ thuộc tính media"
-                        >
-                          <IconEdit className="h-3.5 w-3.5 text-slate-500" />
-                          <span>Sửa</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          onClick={() => setTargetCreative(item)}
-                          className="inline-flex items-center gap-1 rounded-lg border border-emerald-300 bg-emerald-50 px-2.5 py-1 text-xs font-bold text-emerald-800 hover:bg-emerald-100 transition shadow-2xs cursor-pointer"
-                        >
-                          <IconPlus className="h-3.5 w-3.5" />
-                          <span>Playlist</span>
-                        </button>
-
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() => {
-                            if (
-                              confirm(
-                                `Xoá vĩnh viễn tệp "${item.name}" khỏi Thư viện Media? Tệp tin và toàn bộ dữ liệu đo sẽ bị xoá.`
-                              )
-                            ) {
-                              act(() => api.deleteAd(item.id));
-                            }
-                          }}
-                          className="flex h-7 w-7 items-center justify-center rounded-lg border border-rose-200 bg-rose-50 text-rose-600 hover:bg-rose-100 transition cursor-pointer"
-                          title="Xoá tệp vĩnh viễn"
-                        >
-                          <IconTrash className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-
-                {!filteredMedia.length && (
-                  <tr>
-                    <td colSpan={8} className="py-12 text-center text-slate-500">
-                      Không có tệp media nào phù hợp với bộ lọc hiện tại.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* ==================== MODAL: ADD TO PLAYLIST ==================== */}
-      {targetCreative && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-xs p-4 animate-in fade-in duration-150">
-          <div className="w-full max-w-md rounded-2xl bg-white p-5 sm:p-6 shadow-2xl border border-slate-200 space-y-4">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-              <div>
-                <h3 className="text-sm font-bold text-slate-900">
-                  Thêm vào Playlist
-                </h3>
-                <p className="text-xs text-slate-500 truncate max-w-xs mt-0.5">
-                  Tệp: <strong>{targetCreative.name}</strong>
-                </p>
-              </div>
-              <button
-                onClick={() => setTargetCreative(null)}
-                className="text-slate-400 hover:text-slate-600 text-xs font-semibold"
-              >
-                Đóng
-              </button>
-            </div>
-
-            <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-              <p className="text-xs text-slate-600 font-medium">Chọn Playlist bạn muốn thêm tệp này vào:</p>
-              {playlists.map((pl) => (
-                <div
-                  key={pl.id}
-                  className="flex items-center justify-between p-2.5 rounded-xl border border-slate-200 bg-slate-50/50 hover:bg-slate-100/80 transition"
-                >
-                  <div className="min-w-0">
-                    <p className="text-xs font-bold text-slate-900 truncate flex items-center gap-1.5">
-                      <span>{pl.name}</span>
-                      {pl.is_active && (
-                        <span className="rounded bg-emerald-100 text-emerald-800 text-[9px] px-1.5 py-0.2 font-bold">
-                          ĐANG PHÁT
-                        </span>
-                      )}
-                    </p>
-                    <p className="text-[11px] text-slate-500 mt-0.5">
-                      {pl.item_count} clip · {formatSeconds(pl.total_duration)}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => handleAddMediaToPlaylist(pl.id, targetCreative.id)}
-                    className="inline-flex items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-emerald-700 shadow-xs shrink-0"
-                  >
-                    <IconPlus className="h-3 w-3" />
-                    <span>Thêm</span>
-                  </button>
-                </div>
-              ))}
-
-              {!playlists.length && (
-                <div className="text-center py-4 text-xs text-slate-500">
-                  Chưa có playlist nào. Hãy sang trang &quot;Quản lý Playlist&quot; để tạo một playlist trước.
                 </div>
               )}
-            </div>
 
-            <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs">
-              <Link
-                href="/playlists"
-                className="text-emerald-700 font-semibold hover:underline flex items-center gap-1"
-              >
-                <IconPlus className="h-3.5 w-3.5" />
-                <span>Tạo Playlist mới</span>
-              </Link>
+              <div className="mt-auto pt-3">
+                <div className="flex justify-end border-t border-slate-100 pt-3">
+                  {actionRail(item, ["playlist"])}
+                </div>
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <section className="space-y-3">
+          <Table
+            data={filteredMedia}
+            columns={columns}
+            getRowId={(row) => String(row.id)}
+            rowHeight={76}
+            // Header row plus every body row, capped; the old 48px guess for the
+            // header clipped the last row.
+            height={Math.min(760, 92 + filteredMedia.length * 76)}
+            className="rounded-2xl border border-slate-200/90 bg-white text-xs shadow-xs"
+          />
+          {/* Proposals are taller than a virtualised row, so they open here. */}
+          {filteredMedia
+            .filter((item) => proposals[item.id])
+            .map((item) => (
+              <div key={item.id} className="max-w-lg">
+                <p className="mb-1 text-xs font-semibold text-slate-700">{item.name}</p>
+                <ProposalPanel
+                  item={item}
+                  proposal={proposals[item.id]}
+                  onApply={() => applyProposal(item, proposals[item.id])}
+                  onDismiss={() => dropProposal(item.id)}
+                  busy={busy}
+                />
+              </div>
+            ))}
+        </section>
+      )}
+
+      <ImageViewerContent />
+      </ImageViewer>
+
+      {/* ==================== ADD TO PLAYLIST ==================== */}
+      <Drawer
+        open={Boolean(targetCreative)}
+        onOpenChange={(open) => !open && setTargetCreative(null)}
+        ariaLabel="Thêm vào playlist"
+        className="flex w-full max-w-md flex-col bg-white"
+      >
+        {targetCreative && (
+          <>
+            <div className="flex items-start justify-between gap-3 border-b border-slate-100 p-5">
+              <div className="min-w-0">
+                <h3 className="text-sm font-bold text-slate-900">Thêm vào playlist</h3>
+                <p className="mt-0.5 truncate text-xs text-slate-500">{targetCreative.name}</p>
+              </div>
               <button
                 type="button"
                 onClick={() => setTargetCreative(null)}
-                className="rounded-lg border border-slate-200 bg-white px-3.5 py-1.5 font-medium text-slate-600 hover:bg-slate-50"
+                aria-label="Đóng"
+                className="rounded-lg p-1 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
               >
-                Đóng
+                <IconClose className="h-4 w-4" />
               </button>
             </div>
-          </div>
-        </div>
-      )}
+
+            <div className="flex-1 space-y-2 overflow-y-auto p-5">
+              {isUntargeted(targetCreative) && (
+                <p className="mb-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
+                  Media này chưa nhắm đối tượng. Trong playlist đang phát, chọn quảng cáo thông minh chỉ dùng nó làm
+                  quảng cáo đại trà.
+                </p>
+              )}
+              {playlists.map((pl) => {
+                const count = pl.items?.filter((i) => i.creative_id === targetCreative.id).length ?? 0;
+                return (
+                  <div
+                    key={pl.id}
+                    className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50/50 p-3 transition hover:bg-slate-100/70"
+                  >
+                    <div className="min-w-0">
+                      <p className="flex items-center gap-1.5 truncate text-xs font-bold text-slate-900">
+                        <span className="truncate">{pl.name}</span>
+                        {pl.is_active && (
+                          <AnimatedBadge size="sm" status="success" showIcon={false} className="h-5 rounded px-1.5 text-[9px]">
+                            ĐANG PHÁT
+                          </AnimatedBadge>
+                        )}
+                      </p>
+                      <p className="mt-0.5 text-[11px] text-slate-500">
+                        {pl.item_count} clip · {formatTotal(pl.total_duration)}
+                        {count > 0 && <span className="text-emerald-700"> · đã có {count} lần</span>}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => handleAddMediaToPlaylist(pl.id, targetCreative.id)}
+                      className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-bold text-white transition hover:bg-emerald-700 disabled:opacity-50"
+                    >
+                      <IconPlus className="h-3 w-3" />
+                      {count > 0 ? "Thêm lần nữa" : "Thêm"}
+                    </button>
+                  </div>
+                );
+              })}
+              {!playlists.length && (
+                <p className="py-6 text-center text-xs text-slate-500">Chưa có playlist nào.</p>
+              )}
+            </div>
+
+            <div className="border-t border-slate-100 p-5">
+              <Link
+                href="/playlists/new"
+                className="inline-flex items-center gap-1 text-xs font-semibold text-emerald-700 hover:underline"
+              >
+                <IconPlus className="h-3.5 w-3.5" />
+                Tạo playlist mới
+              </Link>
+            </div>
+          </>
+        )}
+      </Drawer>
     </main>
   );
 }

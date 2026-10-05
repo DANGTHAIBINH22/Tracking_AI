@@ -1,29 +1,26 @@
 "use client";
 
 import React from "react";
+import { useIsClient } from "@/lib/useBrowserState";
+import { CHART, CHART_TOOLTIP } from "@/lib/taxonomy";
 import {
-  Area,
-  AreaChart,
   Bar,
   BarChart,
   CartesianGrid,
   Cell,
+  LabelList,
   Legend,
   Pie,
   PieChart,
+  ReferenceArea,
   ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from "recharts";
 
-function useMounted() {
-  const [mounted, setMounted] = React.useState(false);
-  React.useEffect(() => {
-    setMounted(true);
-  }, []);
-  return mounted;
-}
+// Recharts measures the DOM, so charts render on the client only.
+const useMounted = useIsClient;
 
 // -------------------------------------------------------------
 // 1. GENDER DONUT CHART
@@ -40,9 +37,9 @@ export function GenderDonutChart({
   const mounted = useMounted();
   const total = male + female + other;
   const data = [
-    { name: "Nam giới", value: male, color: "#3b82f6" },
-    { name: "Nữ giới", value: female, color: "#ec4899" },
-    ...(other > 0 ? [{ name: "Khác", value: other, color: "#94a3b8" }] : []),
+    { name: "Nam", value: male, color: CHART.male },
+    { name: "Nữ", value: female, color: CHART.female },
+    ...(other > 0 ? [{ name: "Chưa rõ", value: other, color: CHART.unknown }] : []),
   ];
 
   if (!mounted) {
@@ -62,17 +59,11 @@ export function GenderDonutChart({
       <ResponsiveContainer width="100%" height="100%">
         <PieChart>
           <Tooltip
+            {...CHART_TOOLTIP}
             formatter={(val: unknown) => {
               const n = Number(val) || 0;
               const pct = total ? Math.round((n / total) * 100) : 0;
               return [`${n.toLocaleString()} lượt (${pct}%)`, ""];
-            }}
-            contentStyle={{
-              backgroundColor: "#ffffff",
-              borderColor: "#e2e8f0",
-              borderRadius: "0.5rem",
-              fontSize: "12px",
-              boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)",
             }}
           />
           <Pie
@@ -81,7 +72,10 @@ export function GenderDonutChart({
             cy="50%"
             innerRadius={50}
             outerRadius={75}
-            paddingAngle={4}
+            paddingAngle={2}
+            cornerRadius={4}
+            stroke="#ffffff"
+            strokeWidth={2}
             dataKey="value"
           >
             {data.map((entry, index) => (
@@ -92,12 +86,12 @@ export function GenderDonutChart({
             verticalAlign="bottom"
             height={36}
             iconType="circle"
-            formatter={(value, entry) => {
+            formatter={(value) => {
               const item = data.find((d) => d.name === value);
               const pct = item && total ? Math.round((item.value / total) * 100) : 0;
               return (
                 <span className="text-xs font-medium text-slate-700">
-                  {value}: <strong style={{ color: entry.color }}>{pct}%</strong>
+                  {value}: <strong className="text-slate-900">{pct}%</strong>
                 </span>
               );
             }}
@@ -123,13 +117,13 @@ export function AgeDistributionBarChart({
   // would state a precision that was never recorded. It only appears while old
   // rows are still inside the reporting window.
   const chartData = [
-    { group: "<6", label: "Dưới 6", count: data["<6"] || 0 },
-    { group: "6-13", label: "6 - 13", count: data["6-13"] || 0 },
-    { group: "13-18", label: "13 - 18", count: data["13-18"] || 0 },
-    { group: "18-35", label: "18 - 35", count: (data["18-35"] || 0) + (data["18-24"] || 0) + (data["25-34"] || 0) },
-    { group: "35-55", label: "35 - 55", count: (data["35-55"] || 0) + (data["35-50"] || 0) },
-    { group: ">55", label: "Trên 55", count: data[">55"] || 0 },
-    { group: "<18", label: "Dưới 18 (cũ)", count: data["<18"] || 0 },
+    { group: "<6", label: "<6", count: data["<6"] || 0 },
+    { group: "6-13", label: "6-13", count: data["6-13"] || 0 },
+    { group: "13-18", label: "13-18", count: data["13-18"] || 0 },
+    { group: "18-35", label: "18-35", count: (data["18-35"] || 0) + (data["18-24"] || 0) + (data["25-34"] || 0) },
+    { group: "35-55", label: "35-55", count: (data["35-55"] || 0) + (data["35-50"] || 0) },
+    { group: ">55", label: ">55", count: data[">55"] || 0 },
+    { group: "<18", label: "<18 (cũ)", count: data["<18"] || 0 },
   ].filter((d) => d.group !== "<18" || d.count > 0);
 
   const total = chartData.reduce((sum, item) => sum + item.count, 0);
@@ -149,40 +143,29 @@ export function AgeDistributionBarChart({
   return (
     <div className="h-56 w-full">
       <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={chartData} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+        <BarChart data={chartData} margin={{ top: 18, right: 4, left: 4, bottom: 0 }} barCategoryGap="20%">
+          {/* Every bar carries its count, so the y-axis would only take width from the labels. */}
           <XAxis
             dataKey="label"
-            axisLine={false}
+            axisLine={{ stroke: "#e2e8f0" }}
             tickLine={false}
-            tick={{ fontSize: 11, fill: "#64748b" }}
+            interval={0}
+            tick={{ fontSize: 10, fill: CHART.axis }}
           />
-          <YAxis
-            axisLine={false}
-            tickLine={false}
-            tick={{ fontSize: 11, fill: "#64748b" }}
-          />
+          <YAxis hide allowDecimals={false} />
           <Tooltip
+            {...CHART_TOOLTIP}
             formatter={(val: unknown) => {
               const n = Number(val) || 0;
               const pct = total ? Math.round((n / total) * 100) : 0;
               return [`${n.toLocaleString()} lượt (${pct}%)`, "Số lượng"];
             }}
-            contentStyle={{
-              backgroundColor: "#ffffff",
-              borderColor: "#e2e8f0",
-              borderRadius: "0.5rem",
-              fontSize: "12px",
-              boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)",
-            }}
           />
-          <Bar dataKey="count" fill="#10b981" radius={[6, 6, 0, 0]}>
-            {chartData.map((_, index) => (
-              <Cell
-                key={`cell-${index}`}
-                fill={index === 1 ? "#059669" : index === 2 ? "#10b981" : "#34d399"}
-              />
-            ))}
+          <Bar dataKey="count" fill={CHART.primary} radius={[4, 4, 0, 0]} maxBarSize={40}
+              // Labels only draw once the grow animation ends; live data restarts it every tick.
+              isAnimationActive={false}
+            >
+            <LabelList dataKey="count" position="top" style={{ fontSize: 10, fill: "#334155" }} formatter={(v) => (Number(v) ? v : "")} />
           </Bar>
         </BarChart>
       </ResponsiveContainer>
@@ -191,126 +174,34 @@ export function AgeDistributionBarChart({
 }
 
 // -------------------------------------------------------------
-// 3. CREATIVE COMPARISON CHART (REACH VS IMPRESSION)
+// 4. AUDIENCE BY HOUR OF DAY
 // -------------------------------------------------------------
-export function CreativePerformanceChart({
-  creatives,
-}: {
-  creatives: {
-    name: string;
-    reach: number;
-    impressions: number;
-    attention_rate: number;
-  }[];
-}) {
-  const mounted = useMounted();
-  const chartData = creatives.slice(0, 6).map((c) => ({
-    name: c.name.length > 15 ? `${c.name.slice(0, 14)}…` : c.name,
-    reach: c.reach,
-    impressions: c.impressions,
-    rate: Math.round(c.attention_rate * 100),
-  }));
-
-  if (!mounted) {
-    return <div className="h-64 w-full animate-pulse bg-slate-50/50 rounded-xl" />;
-  }
-
-  if (!chartData.length) {
-    return (
-      <div className="flex h-56 items-center justify-center text-xs text-slate-400">
-        Chưa có quảng cáo để so sánh
-      </div>
-    );
-  }
-
-  return (
-    <div className="h-64 w-full">
-      <ResponsiveContainer width="100%" height="100%">
-        <BarChart data={chartData} margin={{ top: 10, right: 15, left: -15, bottom: 10 }}>
-          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
-          <XAxis
-            dataKey="name"
-            axisLine={false}
-            tickLine={false}
-            tick={{ fontSize: 11, fill: "#475569" }}
-          />
-          <YAxis
-            axisLine={false}
-            tickLine={false}
-            tick={{ fontSize: 11, fill: "#64748b" }}
-          />
-          <Tooltip
-            formatter={(value: unknown, name: unknown, item: { payload?: { rate?: number } }) => {
-              const n = Number(value) || 0;
-              if (name === "Lượt xem thực (Impression)") {
-                return [`${n.toLocaleString()} (Tỷ lệ: ${item?.payload?.rate ?? 0}%)`, String(name)];
-              }
-              return [`${n.toLocaleString()} người`, String(name)];
-            }}
-            contentStyle={{
-              backgroundColor: "#ffffff",
-              borderColor: "#e2e8f0",
-              borderRadius: "0.5rem",
-              fontSize: "12px",
-              boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)",
-            }}
-          />
-          <Legend
-            verticalAlign="top"
-            align="right"
-            height={30}
-            iconType="circle"
-            formatter={(val) => <span className="text-xs font-medium text-slate-600">{val}</span>}
-          />
-          <Bar name="Lưu lượng tiếp cận (Reach)" dataKey="reach" fill="#94a3b8" radius={[4, 4, 0, 0]} />
-          <Bar name="Lượt xem thực (Impression)" dataKey="impressions" fill="#059669" radius={[4, 4, 0, 0]} />
-        </BarChart>
-      </ResponsiveContainer>
-    </div>
-  );
+/** The hour that drew the most people who watched (ties: most reach). */
+export function peakHour(hours: { hour: number; reach: number; impressions: number }[]) {
+  const best = [...hours].sort((a, b) => b.impressions - a.impressions || b.reach - a.reach)[0];
+  return best && (best.impressions || best.reach) ? best : null;
 }
 
-// -------------------------------------------------------------
-// 4. AIRING AUDIENCE TIMELINE AREA CHART
-// -------------------------------------------------------------
-export function AiringTrendAreaChart({
-  timeline,
+export function AudienceByHourChart({
+  hours,
 }: {
-  timeline: {
-    started_at: number;
-    name: string;
-    reach: number;
-    impressions: number;
-    total_attention_seconds: number;
-  }[];
+  hours: { hour: number; reach: number; impressions: number; attention_seconds: number }[];
 }) {
   const mounted = useMounted();
-  const chartData = [...timeline]
-    .reverse()
-    .slice(-15)
-    .map((row) => {
-      const timeStr = new Date(row.started_at * 1000).toLocaleTimeString("vi-VN", {
-        hour: "2-digit",
-        minute: "2-digit",
-        second: "2-digit",
-      });
-      return {
-        time: timeStr,
-        name: row.name,
-        reach: row.reach,
-        impressions: row.impressions,
-        attentionSeconds: Math.round(row.total_attention_seconds),
-      };
-    });
+  const data = hours.map((h) => ({
+    ...h,
+    label: `${h.hour}h`,
+    passed: Math.max(0, h.reach - h.impressions),
+  }));
+  const peak = peakHour(hours);
 
   if (!mounted) {
     return <div className="h-60 w-full animate-pulse bg-slate-50/50 rounded-xl" />;
   }
-
-  if (!chartData.length) {
+  if (!peak) {
     return (
       <div className="flex h-56 items-center justify-center text-xs text-slate-400">
-        Chưa có phiên phát sóng gần đây
+        Chưa có khán giả nào trong khoảng thời gian này
       </div>
     );
   }
@@ -318,72 +209,56 @@ export function AiringTrendAreaChart({
   return (
     <div className="h-60 w-full">
       <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={chartData} margin={{ top: 10, right: 15, left: -20, bottom: 0 }}>
-          <defs>
-            <linearGradient id="colorReach" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.25} />
-              <stop offset="95%" stopColor="#3b82f6" stopOpacity={0} />
-            </linearGradient>
-            <linearGradient id="colorImp" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
-              <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
-            </linearGradient>
-          </defs>
-          <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+        <BarChart data={data} margin={{ top: 18, right: 8, left: -16, bottom: 0 }} barCategoryGap="16%">
+          <CartesianGrid vertical={false} stroke={CHART.grid} />
+          {/* Shade the busiest hour so the eye lands on it before the legend. */}
+          <ReferenceArea
+            x1={`${peak.hour}h`}
+            x2={`${peak.hour}h`}
+            fill={CHART.primary}
+            fillOpacity={0.08}
+            label={{ value: "Giờ vàng", position: "insideTop", fontSize: 10, fill: "#047857", fontWeight: 600, dy: -16 }}
+          />
           <XAxis
-            dataKey="time"
-            axisLine={false}
+            dataKey="label"
+            axisLine={{ stroke: "#e2e8f0" }}
             tickLine={false}
-            tick={{ fontSize: 10, fill: "#64748b" }}
+            interval={1}
+            tick={{ fontSize: 10, fill: CHART.axis }}
           />
-          <YAxis
-            axisLine={false}
-            tickLine={false}
-            tick={{ fontSize: 11, fill: "#64748b" }}
-          />
+          <YAxis axisLine={false} tickLine={false} allowDecimals={false} tick={{ fontSize: 11, fill: CHART.axis }} />
           <Tooltip
-            formatter={(value: unknown, name: unknown) => [
-              `${Number(value) || 0} lượt`,
-              String(name),
-            ]}
-            labelFormatter={(label, items) => {
-              const item = items?.[0]?.payload;
-              return `${label} · ${item?.name || "Lượt chiếu"}`;
+            {...CHART_TOOLTIP}
+            labelFormatter={(_, items) => {
+              const h = items?.[0]?.payload as (typeof data)[number] | undefined;
+              if (!h) return "";
+              const avg = h.impressions ? ` · nhìn TB ${(h.attention_seconds / Math.max(1, h.reach)).toFixed(1)}s/người` : "";
+              return `${h.hour}h – ${h.hour + 1}h${avg}`;
             }}
-            contentStyle={{
-              backgroundColor: "#ffffff",
-              borderColor: "#e2e8f0",
-              borderRadius: "0.5rem",
-              fontSize: "12px",
-              boxShadow: "0 4px 6px -1px rgb(0 0 0 / 0.1)",
-            }}
+            formatter={(value: unknown, name: unknown) => [`${Number(value) || 0} người`, String(name)]}
+            itemSorter={(item) => (item.dataKey === "impressions" ? 0 : 1)}
           />
+          {/* Bottom, so the "Giờ vàng" tag above the peak bar never sits under it. */}
           <Legend
-            verticalAlign="top"
-            align="right"
-            height={30}
+            verticalAlign="bottom"
+            align="center"
             iconType="circle"
+            iconSize={8}
+            wrapperStyle={{ paddingTop: 6 }}
+            itemSorter={(item) => (item.dataKey === "impressions" ? 0 : 1)}
             formatter={(val) => <span className="text-xs font-medium text-slate-600">{val}</span>}
           />
-          <Area
-            type="monotone"
-            name="Lưu lượng qua (Reach)"
-            dataKey="reach"
-            stroke="#3b82f6"
-            strokeWidth={2}
-            fillOpacity={1}
-            fill="url(#colorReach)"
+          <Bar dataKey="impressions" name="Xem thực (Impression)" stackId="a" fill={CHART.primary} stroke="#ffffff" strokeWidth={1} />
+          <Bar
+            dataKey="passed"
+            name="Chỉ đi qua"
+            stackId="a"
+            fill={CHART.context}
+            stroke="#ffffff"
+            strokeWidth={1}
+            radius={[4, 4, 0, 0]}
           />
-          <Area
-            type="monotone"
-            name="Xem thực (Impression)"
-            dataKey="impressions"
-            stroke="#10b981"
-            strokeWidth={2}
-            fillOpacity={1}
-            fill="url(#colorImp)"
-          />
-        </AreaChart>
+        </BarChart>
       </ResponsiveContainer>
     </div>
   );

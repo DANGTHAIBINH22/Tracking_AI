@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, File, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, File, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from server.auth import get_optional_user
 from server.settings import SETTINGS
 from server.sources import PlaylistSource, is_browser_source
 from server.state import ENGINE
@@ -48,12 +50,16 @@ def state() -> dict:
             # `source` is the whole queue when several clips are running back to
             # back; these two say where in it the engine currently is.
             "source_now": snap.get("source_now"), "queue": snap.get("queue"),
-            "mode": snap["mode"], "fps": snap["fps"], "error": snap["error"],
+            "mode": snap["mode"], "device_id": snap["device_id"],
+            "fps": snap["fps"], "error": snap["error"],
             "ingest": ENGINE.browser.status()}
 
 
 @router.post("/start")
-def start(body: CaptureStart | None = None) -> dict:
+def start(
+    body: CaptureStart | None = None,
+    user: Annotated[dict | None, Depends(get_optional_user)] = None,
+) -> dict:
     queued = [s.strip() for s in (body.sources or [])] if body else []
     queued = [s for s in queued if s]
     if queued and any(is_browser_source(s) for s in queued):
@@ -70,7 +76,8 @@ def start(body: CaptureStart | None = None) -> dict:
         snap = ENGINE.snapshot()
         if snap.get("source") != source:
             ENGINE.stop()
-    ENGINE.start(source=source, device_id=device_id, screen_id=screen_id, notes=notes)
+    ENGINE.start(source=source, device_id=device_id, screen_id=screen_id, notes=notes,
+                 user_id=user["id"] if user else None)
 
     if is_browser_source(source):
         # There is nothing to wait for: frames only start once a screen opens
@@ -102,6 +109,17 @@ _VIDEO_EXTS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 # A subfolder of data/ is a named set of clips rather than a stray upload, so it
 # gets a heading in the picker instead of 35 unlabelled buttons in one row.
 _FOLDER_LABELS = {
+    # The real-world test scenarios (eval/scenarios/fetch.sh), one folder each
+    # so the picker shows them as numbered headings in order.
+    "kb1_two_men_18_35": "1. Nhóm 2 nam giới 18–35 tuổi",
+    "kb2_teen_boy": "2. 1 nam thiếu niên dưới 18 tuổi",
+    "kb3_two_women_18_35": "3. Nhóm 2 nữ giới 18–35 tuổi",
+    "kb4_with_pet": "4. Khán giả đi cùng động vật / thú cưng",
+    "kb5_teen_girl": "5. 1 nữ thiếu niên dưới 18 tuổi",
+    "kb6_mixed_3f_1m": "6. Nhóm hỗn hợp: 3 nữ + 1 nam",
+    "kb7_crowd": "7. Đám đông ≥ 5 người không chú ý",
+    "kb8_two_men_linger": "8. 2 nam đứng lâu (anti-repetition)",
+    # Older sets, if fetched again (see data/.archive/ and eval/age_kids/).
     "age_kids": "Trẻ em & thiếu niên (kiểm tra ước lượng tuổi)",
     "age_adults": "Người trung niên & cao tuổi (kiểm tra 35-55 / >55)",
     "retail": "Bối cảnh bán lẻ (khách đi ngang, chọn hàng, quầy thu ngân)",
